@@ -1,0 +1,115 @@
+# Phase 4 — Baseline fine-tuning: all Bengali models, LoRA BF16, multi-seed.
+#
+# These are the FP references every later phase measures quantization against, so the
+# train recipe is deliberately identical to the Phase 3 pilot (configs/pilot) and only
+# the model matrix / seed matrix widen.
+phase: 4
+language: bn
+dataset: bd_shs
+split: loco_slander        # primary LOCO fold, matching the Phase 3 pilot
+
+# Seeds are fixed by the plan (instruction.md global rule 7).
+seeds:
+  headline: [13, 42, 1234, 2024, 7]
+  secondary: [13, 42, 1234]
+
+# Canonical ids come from the plan. `meta-llama/*` and `google/gemma-*` are gated and
+# cannot be fetched without an HF token, so each carries mirrors of the *same weights*
+# (identical architecture / vocab). resolve_model_id() tries them in order and records
+# every substitution in the run manifest.
+models:
+  - key: qwen2_5_0_5b_instruct
+    hf_id: Qwen/Qwen2.5-0.5B-Instruct
+    mirrors: []
+    tier: headline
+  - key: qwen2_5_1_5b_instruct
+    hf_id: Qwen/Qwen2.5-1.5B-Instruct
+    mirrors: []
+    tier: headline
+  - key: llama3_2_1b_instruct
+    hf_id: meta-llama/Llama-3.2-1B-Instruct
+    mirrors:
+      - unsloth/Llama-3.2-1B-Instruct
+      - NousResearch/Llama-3.2-1B
+    tier: secondary
+  - key: gemma2_2b_it
+    hf_id: google/gemma-2-2b-it
+    mirrors:
+      - unsloth/gemma-2-2b-it
+    tier: secondary
+    # Gemma-2 sliding-window attention + logit soft-capping are not handled correctly
+    # by the fused sdpa kernel; transformers warns to use eager. Measured cost: +7%.
+    attn_implementation: eager
+
+model:
+  dtype: bfloat16
+  verbalizer:
+    hate: " A"
+    nonhate: " B"
+
+train:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  lr: 2.0e-4
+  epochs: 1
+  batch_size: 2
+  eval_batch_size: 4
+  grad_accum: 8
+  grad_checkpointing: true
+  bf16: true
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  lr_scheduler: cosine
+  max_grad_norm: 1.0
+  logging_steps: 10
+  save_strategy: epoch
+  eval_strategy: epoch
+  save_total_limit: 1
+  metric_for_best_model: eval_loss
+  dataloader_workers: 0
+
+data:
+  max_len: 256
+  prompt_template: "{text}\nবাক্যটি ঘৃণামূলক কি না? উত্তর:"
+  processed: data/processed/bd_shs_processed.csv
+  splits: data/splits/bd_shs_loco_splits.json
+
+# 0 = use the whole frozen split. Caps exist for rehearsal runs and for bounding a
+# long sweep on a single GPU; they are recorded in every run manifest.
+caps:
+  max_train_samples: 0
+  max_val_samples: 0
+  max_eval_samples: 0
+
+eval:
+  batch_size: 8
+  ece_bins: 15
+  ece_strategy: equal_width
+  eval_splits: [id_val, id_test, ood_test]
+
+# T4.2 / T4.3 acceptance thresholds from the phase plan.
+sanity:
+  min_macro_f1_id_test: 0.55
+  require_both_classes_predicted: true
+  prob_sum_tol: 1.0e-6
+  merge_atol: 0.05
+  merge_margin_tol: 1.0
+  # T4.9: across seeds of one model, macro-F1 standard deviation must stay below this.
+  max_seed_f1_std: 0.05
+  # Abort a run whose validation loss explodes rather than burning GPU hours.
+  max_final_train_loss: 5.0
+
+paths:
+  models: outputs/models/phase4
+  logits: outputs/logits/phase4
+  runs: outputs/runs/phase4
+  results: outputs/results
+  summary: outputs/results/phase4_summary.json
+  metrics_csv: outputs/results/phase4_metrics.csv
+
+# Keep the merged bf16 checkpoint: it is the FP reference and Phase 6 quantizes it.
+# Merged bf16 across the full 16-run matrix is ~45 GB; set false to delete after
+# logits extraction and re-materialize later (Phase 6 then needs a re-run).
+keep_merged: true
