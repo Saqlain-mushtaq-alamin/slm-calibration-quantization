@@ -1,0 +1,69 @@
+# Phase 1 data configuration
+data:
+  seed: 42
+  languages:
+    - bn
+    - en
+  tasks:
+    - hate_speech_classification
+
+  bengali:
+    primary: bd_shs
+    bd_shs:
+      raw_dir: data/raw/bd_shs
+      expected_n: 50281
+      min_n: 45000
+      text_col: text
+      label_col: label
+      # Domain axis for LOCO: primary hate type + non_hate
+      domain_col: domain
+      min_domain_size: 500
+    secondary:
+      bengali_hs_30k:
+        enabled: true
+        raw_csv: data/raw/bengali_hs_30k/Bengali hate speech .csv
+
+  english_control:
+    # ToxiGen chosen (HateXplain too small for T1.10 size match)
+    primary: toxigen
+    hatexplain_raw_dir: data/raw/hatexplain
+    toxigen_raw_dir: data/raw/toxigen
+    target_n: 50281
+    target_prior: 0.4804  # BD-SHS 24156/50281
+    seed: 42
+
+  dedup:
+    exact: true
+    near: true
+    near_threshold: 0.8
+    minhash_num_perm: 128
+
+  splits:
+    strategy: loco
+    train_frac: 0.7
+    min_domain_size: 500
+
+  shift:
+    embedding_model: paraphrase-multilingual-MiniLM-L12-v2
+    max_samples_per_side: 1500
+    kernels:
+      - rbf_mmd
+      - centroid_cosine
+      - vocab_overlap
+      - oov
+
+  fertility:
+    n_samples: 1000
+    model_ids:
+      - Qwen/Qwen2.5-0.5B
+      - Qwen/Qwen2.5-1.5B-Instruct
+      - HuggingFaceTB/SmolLM2-1.7B-Instruct
+      - unsloth/gemma-2-2b-it
+      - TinyLlama/TinyLlama-1.1B-Chat-v1.0
+      - csebuetnlp/banglabert
+
+  paths:
+    processed: data/processed
+    splits: data/splits
+    results: outputs/results
+    runs: outputs/runs
