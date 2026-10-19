@@ -1,0 +1,54 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Experiment data & artifacts (large / regenerated)
+data/raw/
+data/processed/
+data/splits/
+outputs/models/
+outputs/quantized/
+outputs/logits/
+outputs/runs/
+outputs/results/
+outputs/figures/
+outputs/tables/
+outputs/environment_versions.json
+gptq_log_*.log
+*.gguf
+
+# Keep directory placeholders
+!outputs/**/.gitkeep
+!data/**/.gitkeep
+
+# Planning docs (user-local); code from planning may be referenced but not committed
+planning/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets / local env
+.env
+*.key
+wandb/
+mlruns/
+mlflow.db
+
+# Jupyter
+.ipynb_checkpoints/
