@@ -1,0 +1,22 @@
+# Base experiment config
+project:
+  name: slm-calibration-quantization
+  phase: 0
+  seed: 42
+  deterministic: true
+
+paths:
+  data_raw: data/raw
+  data_processed: data/processed
+  data_splits: data/splits
+  outputs: outputs
+  configs: configs
+
+hardware:
+  min_vram_gb: 7.5
+  expected_gpu: "RTX 4060"
+  min_cuda: "12.0"
+
+logging:
+  run_json: outputs/runs/run.json
+  environment_versions: outputs/environment_versions.json
