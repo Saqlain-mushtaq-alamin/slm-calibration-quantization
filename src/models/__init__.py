@@ -1,0 +1,61 @@
+"""Model fine-tuning, quantization, and inference utilities."""
+
+from src.models.finetune import (
+    DEFAULT_PROMPT_TEMPLATE,
+    DEFAULT_VERBALIZER,
+    FinetuneResult,
+    SFTCollator,
+    VerbalizedSFTDataset,
+    assert_single_token_verbalizer,
+    build_prompt,
+    default_target_modules,
+    finetune_lora,
+    frame_to_examples,
+    label_token_ids,
+    subsample,
+)
+from src.models.logit_extraction import (
+    REQUIRED_COLUMNS,
+    extract_logits_hf,
+    load_logits,
+    probs_to_frame,
+    save_logits,
+    validate_logits_frame,
+)
+from src.models.quantize_track_a import (
+    TRACK_A_METHODS,
+    artifact_size_mb,
+    build_calibration_texts,
+    load_gptq,
+    load_quantized_hf,
+    quant_summary,
+    quantize_gptq,
+)
+
+__all__ = [
+    "DEFAULT_PROMPT_TEMPLATE",
+    "DEFAULT_VERBALIZER",
+    "FinetuneResult",
+    "REQUIRED_COLUMNS",
+    "SFTCollator",
+    "TRACK_A_METHODS",
+    "VerbalizedSFTDataset",
+    "artifact_size_mb",
+    "assert_single_token_verbalizer",
+    "build_calibration_texts",
+    "build_prompt",
+    "default_target_modules",
+    "extract_logits_hf",
+    "finetune_lora",
+    "frame_to_examples",
+    "label_token_ids",
+    "load_gptq",
+    "load_logits",
+    "load_quantized_hf",
+    "probs_to_frame",
+    "quant_summary",
+    "quantize_gptq",
+    "save_logits",
+    "subsample",
+    "validate_logits_frame",
+]
