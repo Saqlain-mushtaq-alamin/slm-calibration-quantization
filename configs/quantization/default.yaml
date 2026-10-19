@@ -1,0 +1,7 @@
+# Placeholder — populated in Phase 6/7
+quantization:
+  track_a:
+    methods: [bnb_int8, bnb_nf4, gptq_int4, awq_int4]
+  track_b:
+    formats: [gguf]
+    quant_types: [Q4_K_M, Q5_K_M, Q8_0]
