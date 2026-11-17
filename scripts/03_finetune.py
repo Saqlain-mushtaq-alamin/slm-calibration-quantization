@@ -18,6 +18,7 @@ Usage:
     python scripts/03_finetune.py --models qwen2_5_1_5b_instruct
     python scripts/03_finetune.py --seeds 42
     python scripts/03_finetune.py --max-train 4000 --max-eval 1200
+    python scripts/03_finetune.py --status             # matrix status table and exit
     python scripts/03_finetune.py --dry-run            # print the matrix, touch nothing
     python scripts/03_finetune.py --force              # ignore existing successes
 """
@@ -27,14 +28,16 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import signal
+import sys
 import time
 import traceback
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in __import__("sys").path:
-    __import__("sys").path.insert(0, str(ROOT))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import pandas as pd
@@ -45,6 +48,7 @@ from sklearn.metrics import f1_score
 from src.data.assemble import (
     SPLIT_PARTS,
     build_split_frames,
+    get_model_commit_sha,
     resolve_model_id,
     split_frame_meta,
 )
@@ -52,6 +56,16 @@ from src.data.splits import load_splits
 from src.metrics.aggregate import evaluate_logits_frame, metrics_frame
 from src.models import finetune as ft
 from src.models import logit_extraction as lx
+from src.utils.atomic import (
+    atomic_write_csv,
+    atomic_write_json,
+    atomic_write_parquet,
+    find_last_valid_checkpoint,
+    is_valid_adapter,
+    is_valid_checkpoint,
+    is_valid_merged,
+    is_valid_parquet,
+)
 from src.utils.config import config_hash, load_config
 from src.utils.logging_utils import setup_logging, write_run_json
 from src.utils.reproducibility import collect_env_snapshot, get_git_commit, set_seed
@@ -89,6 +103,20 @@ LIBRARY_VERSIONS = [
     "pynvml",
     "omegaconf",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Signal Handling / Graceful Stop (B4)
+# ---------------------------------------------------------------------------
+
+def _handle_interrupt(signum: int, frame: Any) -> None:
+    LOG.warning("Received signal %s (interrupted). Stopping gracefully...", signum)
+    ft.set_interrupted(True)
+
+
+signal.signal(signal.SIGINT, _handle_interrupt)
+if hasattr(signal, "SIGBREAK"):
+    signal.signal(signal.SIGBREAK, _handle_interrupt)
 
 
 # ---------------------------------------------------------------------------
@@ -211,17 +239,24 @@ def validate_logits_frame(frame: pd.DataFrame, *, min_macro_f1: float, require_b
     }
 
 
-# ---------------------------------------------------------------------------
-# Per-run execution
-# ---------------------------------------------------------------------------
-
 def _load_dataset(cfg: Any) -> tuple[pd.DataFrame, dict[str, Any]]:
+    split_name = str(cfg["split"])
+    if split_name == "loco_non_hate":
+        raise ValueError(
+            "split 'loco_non_hate' produces a single-class training set and cannot be used for Phase 4 fine-tuning."
+        )
+
     processed = _resolve(cfg["data"]["processed"])
     splits_path = _resolve(cfg["data"]["splits"])
     df = pd.read_csv(processed)
     df["example_id"] = df["example_id"].astype(str)
+
+    # A10.3: NaN/empty text guard
+    if df["text"].isna().any() or (df["text"].str.strip() == "").any():
+        n_bad = int(df["text"].isna().sum() + (df["text"].str.strip() == "").sum())
+        raise ValueError(f"Found {n_bad} null or empty texts in dataset {processed}")
+
     splits, sha = load_splits(splits_path)
-    split_name = str(cfg["split"])
     if split_name not in splits:
         raise KeyError(f"split {split_name!r} not in {_dev(splits_path)}; have {list(splits)}")
     return df, {"spec": splits[split_name], "sha": sha, "path": _dev(splits_path), "name": split_name}
@@ -238,9 +273,114 @@ def _release(model: Any) -> None:
         torch.cuda.synchronize()
 
 
+# ---------------------------------------------------------------------------
+# Status Table (B7)
+# ---------------------------------------------------------------------------
+
+def show_status(cfg: Any, matrix: list[dict[str, Any]]) -> None:
+    """Print the sweep matrix status table and exit."""
+    runs_dir = _resolve(cfg["paths"]["runs"])
+    models_dir = _resolve(cfg["paths"]["models"])
+    logits_dir = _resolve(cfg["paths"]["logits"])
+
+    rows: list[dict[str, str]] = []
+    for cell in matrix:
+        name = cell["run_name"]
+        run_json = runs_dir / f"{name}.json"
+        out_dir = models_dir / name
+        run_logits = logits_dir / name
+        ckpts_dir = out_dir / "checkpoints"
+
+        stages: list[str] = []
+        if is_valid_adapter(out_dir / "adapter"):
+            stages.append("train")
+        if is_valid_merged(out_dir / "merged"):
+            stages.append("merge")
+        for s in EVAL_SPLITS:
+            if is_valid_parquet(run_logits / f"bf16__{s}.parquet"):
+                stages.append(s)
+        if run_json.is_file():
+            stages.append("manifest")
+
+        status = "pending"
+        vram = "-"
+        wall = "-"
+        f1 = "-"
+
+        if run_json.is_file():
+            try:
+                data = json.loads(run_json.read_text(encoding="utf-8"))
+                status = str(data.get("status", "unknown"))
+                vram_val = (data.get("finetune") or {}).get("peak_vram_gb")
+                vram = f"{vram_val:.2f} GB" if vram_val is not None else "-"
+                wall_val = data.get("wall_s")
+                wall = f"{wall_val:.1f}s" if wall_val is not None else "-"
+                f1_val = (data.get("T4.2") or {}).get("macro_f1")
+                f1 = f"{f1_val:.4f}" if f1_val is not None else "-"
+            except Exception:
+                status = "corrupted_json"
+        elif "train" in stages:
+            status = "eval" if len(stages) < 5 else "eval_done"
+            tm_file = out_dir / "train_metrics.json"
+            if tm_file.is_file():
+                try:
+                    tm = json.loads(tm_file.read_text(encoding="utf-8"))
+                    vram_val = tm.get("peak_vram_gib")
+                    vram = f"{vram_val:.2f} GB" if vram_val is not None else "-"
+                    wall_val = tm.get("wall_s", tm.get("train_runtime_s"))
+                    wall = f"{wall_val:.1f}s" if wall_val is not None else "-"
+                except Exception:
+                    pass
+        elif ckpts_dir.is_dir() and any(ckpts_dir.iterdir()):
+            status = "training"
+
+        last_ckpt = find_last_valid_checkpoint(ckpts_dir)
+        last_ckpt_str = last_ckpt.name if last_ckpt else "-"
+
+        rows.append(
+            {
+                "model_key": cell["model_key"],
+                "seed": str(cell["seed"]),
+                "status": status,
+                "stages": "+".join(stages) if stages else "-",
+                "last_ckpt": last_ckpt_str,
+                "peak_vram": vram,
+                "wall_time": wall,
+                "id_test_f1": f1,
+            }
+        )
+
+    # Format into markdown/ascii table
+    headers = ["Model Key", "Seed", "Status", "Stages", "Last Ckpt", "Peak VRAM", "Wall Time", "id_test F1"]
+    col_keys = ["model_key", "seed", "status", "stages", "last_ckpt", "peak_vram", "wall_time", "id_test_f1"]
+    col_widths = [len(h) for h in headers]
+    for r in rows:
+        for idx, k in enumerate(col_keys):
+            col_widths[idx] = max(col_widths[idx], len(r[k]))
+
+    sep = "+-" + "-+-".join("-" * w for w in col_widths) + "-+"
+    hdr_line = "| " + " | ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers)) + " |"
+
+    print("\nPhase 4 Sweep Matrix Status:")
+    print(sep)
+    print(hdr_line)
+    print(sep)
+    for r in rows:
+        line = "| " + " | ".join(r[k].ljust(col_widths[i]) for i, k in enumerate(col_keys)) + " |"
+        print(line)
+    print(sep + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Per-run execution
+# ---------------------------------------------------------------------------
+
 def run_one(cell: dict[str, Any], cfg: Any, dataset: dict[str, Any], *, force: bool) -> dict[str, Any]:
     """Train, extract logits for every eval set, validate, and write one run manifest."""
     from src.metrics.efficiency import Stopwatch
+
+    if ft.is_interrupted():
+        raise KeyboardInterrupt("Stopped by user before starting cell")
 
     seed = int(cell["seed"])
     name = cell["run_name"]
@@ -270,6 +410,7 @@ def run_one(cell: dict[str, Any], cfg: Any, dataset: dict[str, Any], *, force: b
         "model_key": cell["model_key"],
         "canonical_hf_id": cell["hf_id"],
         "resolved_hf_id": cell["resolved_hf_id"],
+        "resolved_revision": get_model_commit_sha(cell["resolved_hf_id"]),
         "mirror_notes": cell.get("mirror_notes", []),
         "tier": cell["tier"],
         "seed": seed,
@@ -281,158 +422,256 @@ def run_one(cell: dict[str, Any], cfg: Any, dataset: dict[str, Any], *, force: b
         "git_commit": get_git_commit(str(ROOT)),
     }
 
-    # ---- resumability: a completed cell is not re-trained -------------------
+    # Materialize frames for this cell
+    set_seed(seed)
+    spec = dataset["spec"]
+    caps_cfg = cfg.get("caps", {}) or {}
+    caps = {
+        "train": int(caps_cfg.get("max_train_samples") or 0) or None,
+        "id_val": int(caps_cfg.get("max_val_samples") or 0) or None,
+        "id_test": int(caps_cfg.get("max_eval_samples") or 0) or None,
+        "ood_test": int(caps_cfg.get("max_eval_samples") or 0) or None,
+    }
+    frames = build_split_frames(
+        dataset["df"], spec, caps=caps, seed=seed, parts=SPLIT_PARTS
+    )
+    manifest["split_meta"] = split_frame_meta(frames, spec)
+    manifest["split_sha256"] = dataset["sha"]
+    manifest["split_file"] = dataset["path"]
+
     logits_dir = _resolve(cfg["paths"]["logits"]) / name
-    expected_logits = [logits_dir / f"bf16__{s}.parquet" for s in EVAL_SPLITS]
+    expected_logits = {s: logits_dir / f"bf16__{s}.parquet" for s in EVAL_SPLITS}
+
+    # ---- resumability: check if completed with matching config (A7) --------
     if not force and run_json_path.is_file():
         try:
             previous = json.loads(run_json_path.read_text(encoding="utf-8"))
-            complete = previous.get("status") == "success" and all(p.is_file() for p in expected_logits)
-        except Exception:
-            complete = False
-        if complete:
-            LOG.info("SKIP %s (already successful)", name)
-            previous["skipped"] = True
-            return previous
+            parquets_valid = all(
+                is_valid_parquet(expected_logits[s], expected_rows=len(frames[s]))
+                for s in EVAL_SPLITS
+            )
+            match = (
+                previous.get("status") == "success"
+                and previous.get("config_hash") == manifest["config_hash"]
+                and previous.get("split_sha256") == dataset["sha"]
+                and previous.get("resolved_hf_id") == cell["resolved_hf_id"]
+                and parquets_valid
+            )
+            if match:
+                if previous.get("git_commit") != manifest["git_commit"]:
+                    LOG.warning(
+                        "SKIP %s: matching config_hash and split_sha256, but git commit changed (%s -> %s)",
+                        name, previous.get("git_commit"), manifest["git_commit"]
+                    )
+                else:
+                    LOG.info("SKIP %s (already successful with matching config)", name)
+                previous["skipped"] = True
+                return previous
+            else:
+                LOG.info(
+                    "Re-running %s: prev_status=%s, cfg_match=%s, split_match=%s, parquets_valid=%s",
+                    name, previous.get("status"),
+                    previous.get("config_hash") == manifest["config_hash"],
+                    previous.get("split_sha256") == dataset["sha"],
+                    parquets_valid
+                )
+        except Exception as exc:
+            LOG.warning("Failed to parse existing run manifest for %s: %s; re-running", name, exc)
 
-    set_seed(seed)
     t_start = time.perf_counter()
-    try:
-        spec = dataset["spec"]
-        caps_cfg = cfg.get("caps", {}) or {}
-        caps = {
-            "train": int(caps_cfg.get("max_train_samples") or 0) or None,
-            "id_val": int(caps_cfg.get("max_val_samples") or 0) or None,
-            "id_test": int(caps_cfg.get("max_eval_samples") or 0) or None,
-            "ood_test": int(caps_cfg.get("max_eval_samples") or 0) or None,
-        }
-        frames = build_split_frames(
-            dataset["df"], spec, caps=caps, seed=seed, parts=SPLIT_PARTS
-        )
-        manifest["split_meta"] = split_frame_meta(frames, spec)
-        manifest["split_sha256"] = dataset["sha"]
-        manifest["split_file"] = dataset["path"]
+    output_dir = _resolve(cfg["paths"]["models"]) / name
+    adapter_path = output_dir / "adapter"
+    merged_path = output_dir / "merged"
+    train_metrics_file = output_dir / "train_metrics.json"
 
-        output_dir = _resolve(cfg["paths"]["models"]) / name
+    try:
         ft_config["experiment"] = {
             "name": name,
             "seed": seed,
             "output_dir": str(output_dir),
         }
 
-        LOG.info("=== %s | %s | seed=%d | train=%d ===", name, cell["resolved_hf_id"], seed, len(frames["train"]))
-        sw_train = Stopwatch(f"finetune::{name}")
-        with sw_train:
-            result = ft.finetune_lora(ft_config, frames["train"], frames["id_val"])
-        merged_path = result.merged_path
+        # ---- STAGE 1: Train / LoRA Adapter (B3) ---------------------------
+        if not force and is_valid_adapter(adapter_path) and train_metrics_file.is_file():
+            LOG.info("STAGE train: valid adapter already exists at %s; skipping training", adapter_path)
+            try:
+                tm = json.loads(train_metrics_file.read_text(encoding="utf-8"))
+                train_losses = [float(h["loss"]) for h in tm.get("log_history", []) if "loss" in h]
+                loss_dec = bool(
+                    len(train_losses) >= 2
+                    and train_losses[-1] < train_losses[0]
+                    and not any(not np.isfinite(v) for v in train_losses)
+                )
+                manifest["finetune"] = {
+                    "n_train": int(tm.get("n_train", len(frames["train"]))),
+                    "n_id_val": int(tm.get("n_id_val", len(frames["id_val"]))),
+                    "epochs": float(cfg["train"]["epochs"]),
+                    "first_train_loss": train_losses[0] if train_losses else None,
+                    "final_train_loss": train_losses[-1] if train_losses else None,
+                    "loss_decreased": loss_dec,
+                    "any_nan": bool(train_losses) and not all(np.isfinite(v) for v in train_losses),
+                    "best_eval_loss": tm.get("eval", {}).get("eval_loss"),
+                    "best_checkpoint": tm.get("best_checkpoint"),
+                    "trainable_params": int(tm.get("trainable_params", 0)),
+                    "total_params": int(tm.get("total_params", 0)),
+                    "label_token_ids": tm.get("label_token_ids"),
+                    "max_seq_len": int(tm.get("max_seq_len", cfg["data"]["max_len"])),
+                    "wall_s": round(float(tm.get("wall_s", tm.get("train_runtime_s", 0.0))), 2),
+                    "peak_vram_gb": None if tm.get("peak_vram_gib") is None else round(float(tm["peak_vram_gib"]), 3),
+                    "energy_wh": tm.get("energy_wh"),
+                }
+            except Exception as exc:
+                LOG.warning("Failed to load existing train_metrics.json (%s); retraining", exc)
+                manifest.pop("finetune", None)
 
-        train_losses = [float(h["loss"]) for h in result.history if "loss" in h]
-        manifest["finetune"] = {
-            "n_train": int(result.n_train),
-            "n_id_val": int(result.n_id_val),
-            "epochs": float(cfg["train"]["epochs"]),
-            "first_train_loss": train_losses[0] if train_losses else None,
-            "final_train_loss": train_losses[-1] if train_losses else None,
-            "loss_decreased": bool(result.loss_decreased),
-            "any_nan": bool(train_losses) and not all(np.isfinite(v) for v in train_losses),
-            "best_eval_loss": result.best_eval_loss,
-            "best_checkpoint": result.best_checkpoint,
-            "trainable_params": int(result.trainable_params),
-            "total_params": int(result.total_params),
-            "label_token_ids": result.label_token_ids,
-            "max_seq_len": int(result.max_seq_len),
-            "wall_s": round(sw_train.wall_s, 2),
-            "peak_vram_gb": None if sw_train.peak_vram_gb is None else round(sw_train.peak_vram_gb, 3),
-            "energy_wh": sw_train.energy_wh,
-        }
+        if "finetune" not in manifest:
+            if ft.is_interrupted():
+                raise KeyboardInterrupt(f"Interrupted before training {name}")
+            LOG.info("=== %s | %s | seed=%d | train=%d ===", name, cell["resolved_hf_id"], seed, len(frames["train"]))
+            sw_train = Stopwatch(f"finetune::{name}")
+            with sw_train:
+                result = ft.finetune_lora(ft_config, frames["train"], frames["id_val"])
 
-        # ---- T4.1 -----------------------------------------------------------
+            train_losses = [float(h["loss"]) for h in result.history if "loss" in h]
+            manifest["finetune"] = {
+                "n_train": int(result.n_train),
+                "n_id_val": int(result.n_id_val),
+                "epochs": float(cfg["train"]["epochs"]),
+                "first_train_loss": train_losses[0] if train_losses else None,
+                "final_train_loss": train_losses[-1] if train_losses else None,
+                "loss_decreased": bool(result.loss_decreased),
+                "any_nan": bool(train_losses) and not all(np.isfinite(v) for v in train_losses),
+                "best_eval_loss": result.best_eval_loss,
+                "best_checkpoint": result.best_checkpoint,
+                "trainable_params": int(result.trainable_params),
+                "total_params": int(result.total_params),
+                "label_token_ids": result.label_token_ids,
+                "max_seq_len": int(result.max_seq_len),
+                "wall_s": round(sw_train.wall_s, 2),
+                "peak_vram_gb": None if sw_train.peak_vram_gb is None else round(sw_train.peak_vram_gb, 3),
+                "energy_wh": sw_train.energy_wh,
+            }
+
+        # ---- STAGE 2: Merge adapter to base model (B3) ---------------------
+        if ft.is_interrupted():
+            raise KeyboardInterrupt(f"Interrupted before merging {name}")
+
+        if not is_valid_merged(merged_path):
+            LOG.info("STAGE merge: merging adapter from %s into %s", adapter_path, merged_path)
+            ft.merge_adapter_to_base(
+                cell["resolved_hf_id"],
+                adapter_path,
+                merged_path,
+                dtype=str(cfg["model"]["dtype"]),
+                attn_implementation=cell.get("attn_implementation") or None,
+            )
+        else:
+            LOG.info("STAGE merge: valid merged model already exists at %s", merged_path)
+
+        # ---- T4.1 Check -----------------------------------------------------
         max_loss = float(cfg["sanity"]["max_final_train_loss"])
+        final_loss = manifest["finetune"]["final_train_loss"]
         t4_1 = {
-            "loss_decreased": bool(result.loss_decreased),
+            "loss_decreased": bool(manifest["finetune"]["loss_decreased"]),
             "no_nan": not manifest["finetune"]["any_nan"],
-            "checkpoint_saved": bool(result.best_checkpoint) and Path(result.adapter_path).is_dir(),
-            "merged_saved": Path(merged_path).is_dir(),
-            "loss_exploded": bool(train_losses and train_losses[-1] > max_loss),
+            "checkpoint_saved": is_valid_adapter(adapter_path),
+            "merged_saved": is_valid_merged(merged_path),
+            "loss_exploded": bool(final_loss is not None and final_loss > max_loss),
             "passed": False,
         }
         t4_1["passed"] = bool(
             t4_1["loss_decreased"]
             and t4_1["no_nan"]
             and t4_1["checkpoint_saved"]
+            and t4_1["merged_saved"]
             and not t4_1["loss_exploded"]
         )
         manifest["T4.1"] = t4_1
 
-        # ---- logits for every eval set ------------------------------------
-        from transformers import AutoModelForCausalLM
-
-        sw_eval = Stopwatch(f"eval::{name}")
+        # ---- STAGE 3: Extract Logits for Eval Sets (B3) --------------------
         logits_dir.mkdir(parents=True, exist_ok=True)
+        splits_to_run = [
+            s for s in EVAL_SPLITS
+            if force or not is_valid_parquet(expected_logits[s], expected_rows=len(frames[s]))
+        ]
+
+        if splits_to_run:
+            if ft.is_interrupted():
+                raise KeyboardInterrupt(f"Interrupted before extracting logits for {name}")
+            LOG.info("STAGE eval: computing logits for splits %s", splits_to_run)
+            sw_eval = Stopwatch(f"eval::{name}")
+            with sw_eval:
+                tokenizer = ft.load_tokenizer(str(merged_path))
+                model = ft.load_base_model(
+                    str(merged_path),
+                    str(cfg["model"]["dtype"]),
+                    attn_implementation=cell.get("attn_implementation") or None,
+                )
+                for split in splits_to_run:
+                    if ft.is_interrupted():
+                        _release(model)
+                        raise KeyboardInterrupt(f"Interrupted during eval split {split}")
+                    frame = lx.extract_logits_hf(
+                        model,
+                        tokenizer,
+                        frames[split],
+                        verbalizer=cfg["model"]["verbalizer"],
+                        batch_size=int(cfg["eval"]["batch_size"]),
+                        split=split,
+                        max_len=int(cfg["data"]["max_len"]),
+                        template=str(cfg["data"]["prompt_template"]),
+                        model_id=f"{cell['resolved_hf_id']}|bf16",
+                    )
+                    lx.save_logits(
+                        frame,
+                        expected_logits[split],
+                        model=cell["resolved_hf_id"],
+                        canonical_model=cell["hf_id"],
+                        model_key=cell["model_key"],
+                        precision="bf16",
+                        seed=seed,
+                        language=str(cfg["language"]),
+                        split_name=dataset["name"],
+                        run_name=name,
+                    )
+                _release(model)
+            manifest["eval"] = {
+                "wall_s": round(sw_eval.wall_s, 2),
+                "peak_vram_gb": None if sw_eval.peak_vram_gb is None else round(sw_eval.peak_vram_gb, 3),
+                "energy_wh": sw_eval.energy_wh,
+                "n_examples": {s: int(len(frames[s])) for s in EVAL_SPLITS},
+            }
+        else:
+            LOG.info("STAGE eval: all eval parquet files already valid for %s", name)
+            manifest["eval"] = {
+                "wall_s": 0.0,
+                "peak_vram_gb": None,
+                "energy_wh": None,
+                "n_examples": {s: int(len(frames[s])) for s in EVAL_SPLITS},
+            }
+
+        # ---- STAGE 4: Validate, compute full metrics, gates (A6, B3) -------
         validation: dict[str, Any] = {}
-        metrics_rows: list[dict[str, Any]] = []
+        split_metrics: dict[str, Any] = {}
         min_f1 = float(cfg["sanity"]["min_macro_f1_id_test"])
         require_both = bool(cfg["sanity"]["require_both_classes_predicted"])
-        with sw_eval:
-            tokenizer = ft.load_tokenizer(merged_path)
-            model = ft.load_base_model(
-                merged_path,
-                str(cfg["model"]["dtype"]),
-                attn_implementation=cell.get("attn_implementation") or None,
+
+        for split in EVAL_SPLITS:
+            frame = pd.read_parquet(expected_logits[split])
+            validation[split] = validate_logits_frame(
+                frame, min_macro_f1=min_f1, require_both_classes=require_both
             )
-            for split in EVAL_SPLITS:
-                frame = lx.extract_logits_hf(
-                    model,
-                    tokenizer,
-                    frames[split],
-                    verbalizer=cfg["model"]["verbalizer"],
-                    batch_size=int(cfg["eval"]["batch_size"]),
-                    split=split,
-                    max_len=int(cfg["data"]["max_len"]),
-                    template=str(cfg["data"]["prompt_template"]),
-                    model_id=f"{cell['resolved_hf_id']}|bf16",
-                )
-                lx.save_logits(
-                    frame,
-                    logits_dir / f"bf16__{split}.parquet",
-                    model=cell["resolved_hf_id"],
-                    canonical_model=cell["hf_id"],
-                    model_key=cell["model_key"],
-                    precision="bf16",
-                    seed=seed,
-                    language=str(cfg["language"]),
-                    split_name=dataset["name"],
-                    run_name=name,
-                )
-                validation[split] = validate_logits_frame(
-                    frame, min_macro_f1=min_f1, require_both_classes=require_both
-                )
-                metrics_rows.append(
-                    {
-                        "model_key": cell["model_key"],
-                        "model": cell["resolved_hf_id"],
-                        "precision": "bf16",
-                        "split": split,
-                        "language": str(cfg["language"]),
-                        "loco": dataset["name"],
-                        "seed": seed,
-                        "run_name": name,
-                        **evaluate_logits_frame(
-                            frame,
-                            ece_bins=int(cfg["eval"]["ece_bins"]),
-                            ece_strategy=str(cfg["eval"]["ece_strategy"]),
-                        ),
-                    }
-                )
-            _release(model)
-        manifest["eval"] = {
-            "wall_s": round(sw_eval.wall_s, 2),
-            "peak_vram_gb": None if sw_eval.peak_vram_gb is None else round(sw_eval.peak_vram_gb, 3),
-            "energy_wh": sw_eval.energy_wh,
-            "n_examples": {s: int(len(frames[s])) for s in EVAL_SPLITS},
-        }
+            eval_metrics = evaluate_logits_frame(
+                frame,
+                ece_bins=int(cfg["eval"]["ece_bins"]),
+                ece_strategy=str(cfg["eval"]["ece_strategy"]),
+            )
+            split_metrics[split] = eval_metrics
+
         manifest["validation"] = validation
-        manifest["metrics"] = {k: v for k, v in metrics_rows[0].items() if k in {"macro_f1", "accuracy", "auroc", "ece", "brier", "nll", "aurc"}}
+        manifest["split_metrics"] = split_metrics
+        # A6: Full per-run metrics in manifest (defaulting to id_test for primary top-level)
+        manifest["metrics"] = split_metrics.get("id_test", {})
 
         # ---- T4.2 / T4.3 / T4.5 / T4.6 -------------------------------------
         id_test = validation["id_test"]
@@ -447,8 +686,8 @@ def run_one(cell: dict[str, Any], cfg: Any, dataset: dict[str, Any], *, force: b
         }
         manifest["T4.4"] = {
             "expected": [f"bf16__{s}.parquet" for s in EVAL_SPLITS],
-            "found": [p.name for p in expected_logits if p.is_file()],
-            "passed": all(p.is_file() for p in expected_logits),
+            "found": [expected_logits[s].name for s in EVAL_SPLITS if expected_logits[s].is_file()],
+            "passed": all(expected_logits[s].is_file() for s in EVAL_SPLITS),
         }
         manifest["T4.5"] = {
             "max_dev": max(validation[s]["max_prob_sum_deviation"] for s in EVAL_SPLITS),
@@ -459,8 +698,8 @@ def run_one(cell: dict[str, Any], cfg: Any, dataset: dict[str, Any], *, force: b
         }
 
         manifest["artifacts"] = {
-            "adapter_path": _dev(Path(result.adapter_path)),
-            "merged_path": _dev(Path(merged_path)),
+            "adapter_path": _dev(adapter_path),
+            "merged_path": _dev(merged_path),
             "logits_dir": _dev(logits_dir),
         }
         manifest["status"] = (
@@ -470,12 +709,22 @@ def run_one(cell: dict[str, Any], cfg: Any, dataset: dict[str, Any], *, force: b
         )
         manifest["wall_s"] = round(time.perf_counter() - t_start, 2)
 
-        if not bool(cfg.get("keep_merged", True)):
+        # Cleanup checkpoints ONLY after full success (B5)
+        if manifest["status"] == "success":
+            ckpts_dir = output_dir / "checkpoints"
+            if ckpts_dir.is_dir():
+                LOG.info("Cleaning up training checkpoints directory for %s", name)
+                shutil.rmtree(ckpts_dir, ignore_errors=True)
+
+        if not bool(cfg.get("keep_merged", True)) and manifest["status"] == "success":
             shutil.rmtree(merged_path, ignore_errors=True)
             manifest["artifacts"]["merged_path"] = None
             manifest["artifacts"]["merged_deleted"] = True
 
-    except Exception as exc:  # noqa: BLE001 — a failed cell must be recorded, not dropped
+    except KeyboardInterrupt:
+        LOG.warning("Run %s interrupted by user; state preserved for resume", name)
+        raise
+    except Exception as exc:  # noqa: BLE001
         manifest["status"] = "failed"
         manifest["error"] = f"{type(exc).__name__}: {exc}"
         manifest["traceback"] = traceback.format_exc()
@@ -523,7 +772,6 @@ def _seed_variance(records: list[dict[str, Any]], max_std: float) -> dict[str, A
             "macro_f1_mean": float(np.mean(values)),
             "macro_f1_std": std,
             "max_allowed_std": max_std,
-            # A single seed cannot demonstrate stability; that is not a failure.
             "passed": bool(std < max_std) if len(values) > 1 else None,
         }
     return out
@@ -542,9 +790,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         overrides.append("keep_merged=false")
 
     cfg = load_config(CFG_PATH, overrides)
+
+    # Separate smoke/capped output root (B6)
+    is_smoke_or_capped = bool(args.smoke or args.max_train or args.max_eval)
+    if is_smoke_or_capped:
+        cfg["paths"]["runs"] = "outputs/runs/phase4_smoke"
+        cfg["paths"]["models"] = "outputs/models/phase4_smoke"
+        cfg["paths"]["logits"] = "outputs/logits/phase4_smoke"
+        cfg["paths"]["results"] = "outputs/results/phase4_smoke"
+        cfg["paths"]["metrics_csv"] = "outputs/results/phase4_smoke/phase4_metrics.csv"
+        cfg["paths"]["summary"] = "outputs/results/phase4_smoke/phase4_summary.json"
+
     matrix = build_run_matrix(cfg, args.models or None, args.seeds or None)
     if not matrix:
         raise ValueError("run matrix is empty; check --models / --seeds filters")
+
+    if args.status:
+        show_status(cfg, matrix)
+        return {"status": "status_displayed", "matrix_size": len(matrix)}
 
     LOG.info("Phase 4 run matrix (%d cells):", len(matrix))
     for cell in matrix:
@@ -559,7 +822,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     df, dataset = _load_dataset(cfg)
     dataset["df"] = df
 
-    # Resolve canonical -> reachable model id once per model, not once per seed.
+    # Resolve canonical -> reachable model id once per model
     resolved: dict[str, tuple[str, list[str]]] = {}
     for cell in matrix:
         if cell["model_key"] not in resolved:
@@ -574,19 +837,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 resolved[cell["model_key"]] = (cell["hf_id"], [f"unresolvable: {exc}"])
 
     records: list[dict[str, Any]] = []
-    for i, cell in enumerate(matrix, start=1):
-        cell = dict(cell)
-        cell["resolved_hf_id"], cell["mirror_notes"] = resolved[cell["model_key"]]
-        LOG.info("--- [%d/%d] %s ---", i, len(matrix), cell["run_name"])
-        records.append(run_one(cell, cfg, dataset, force=args.force))
+    stopped_early = False
+
+    try:
+        for i, cell in enumerate(matrix, start=1):
+            if ft.is_interrupted():
+                stopped_early = True
+                break
+            cell = dict(cell)
+            cell["resolved_hf_id"], cell["mirror_notes"] = resolved[cell["model_key"]]
+            LOG.info("--- [%d/%d] %s ---", i, len(matrix), cell["run_name"])
+            records.append(run_one(cell, cfg, dataset, force=args.force))
+    except KeyboardInterrupt:
+        stopped_early = True
+        LOG.warning("Execution stopped; re-run the same command to resume.")
+
+    if stopped_early:
+        print("\n[STOPPED] Execution stopped; re-run the same command to resume.\n")
+        return {"status": "stopped", "n_processed": len(records)}
 
     # ---- aggregate ---------------------------------------------------------
     succeeded = [r for r in records if r.get("status") == "success"]
     failed = [r for r in records if r.get("status") != "success"]
     variance = _seed_variance(succeeded, float(cfg["sanity"]["max_seed_f1_std"]))
 
-    # T4.8: every model saw the same frozen data under the same recipe.  The gates above
-    # must not read "true" just because nothing succeeded, hence the explicit guard.
+    # T4.8: data frozen under same recipe
     split_hashes = sorted({r.get("split_sha256") for r in succeeded if r.get("split_sha256")})
     train_sizes = sorted({(r.get("finetune") or {}).get("n_train") for r in succeeded})
     t4_8_detail = {
@@ -598,9 +873,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "languages": sorted({r.get("language") for r in succeeded if r.get("language")}),
     }
 
+    # A6: Full per-run metrics for all three splits
     metric_rows: list[dict[str, Any]] = []
     for rec in succeeded:
-        for split, val in (rec.get("validation") or {}).items():
+        split_metrics = rec.get("split_metrics") or {}
+        validation = rec.get("validation") or {}
+        for split in EVAL_SPLITS:
+            val = validation.get(split, {})
+            s_metrics = split_metrics.get(split, {})
             metric_rows.append(
                 {
                     "model_key": rec["model_key"],
@@ -611,17 +891,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "language": rec["language"],
                     "loco": rec["split"],
                     "run_name": rec["run_name"],
-                    "n": val["n_rows"],
-                    "macro_f1": val["macro_f1"],
-                    "accuracy": val["accuracy"],
-                    "single_class": val["single_class"],
+                    "n": val.get("n_rows"),
+                    "macro_f1": val.get("macro_f1"),
+                    "accuracy": val.get("accuracy"),
+                    "single_class": val.get("single_class"),
+                    **s_metrics,
                 }
             )
+
     table = metrics_frame(metric_rows)
     results_dir = _resolve(cfg["paths"]["results"])
     results_dir.mkdir(parents=True, exist_ok=True)
     table_path = _resolve(cfg["paths"]["metrics_csv"])
-    table.to_csv(table_path, index=False)
+    atomic_write_csv(table_path, table)
 
     summary = {
         "phase": 4,
@@ -665,7 +947,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     }
     summary_path = _resolve(cfg["paths"]["summary"])
     summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    atomic_write_json(summary_path, summary)
 
     print(
         json.dumps(
@@ -693,6 +975,7 @@ def main() -> int:
     parser.add_argument("--split", type=str, default="", help="override the LOCO split name")
     parser.add_argument("--no-keep-merged", action="store_true", help="delete merged bf16 after logits")
     parser.add_argument("--force", action="store_true", help="re-run cells that already succeeded")
+    parser.add_argument("--status", action="store_true", help="show sweep matrix status table and exit")
     parser.add_argument("--dry-run", action="store_true", help="print the run matrix and exit")
     args = parser.parse_args()
     if args.smoke:
@@ -700,7 +983,7 @@ def main() -> int:
         args.max_eval = args.max_eval or 32
         args.models = args.models or None
     result = run(args)
-    return 0 if result.get("status") in {"passed", "passed_with_failures", "dry_run"} else 1
+    return 0 if result.get("status") in {"passed", "passed_with_failures", "dry_run", "status_displayed"} else 1
 
 
 if __name__ == "__main__":
