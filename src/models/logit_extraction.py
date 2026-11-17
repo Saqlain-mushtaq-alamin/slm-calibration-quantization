@@ -23,6 +23,7 @@ from src.models.finetune import (
     build_prompt,
     encode_label_token,
 )
+from src.utils.atomic import atomic_write_parquet
 
 LOG = logging.getLogger("slm-calib.logits")
 
