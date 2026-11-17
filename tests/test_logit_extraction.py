@@ -147,6 +147,18 @@ def test_bos_token_prepended_and_preserved_in_eval():
     assert lh[0] == pytest.approx(4 + 0.001 * HATE_ID, abs=1e-4)
 
 
+class MockBaseModel(torch.nn.Module):
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.linear = torch.nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, input_ids=None, attention_mask=None, use_cache=None, **kwargs):
+        b, t = input_ids.shape
+        hidden = input_ids.unsqueeze(-1).expand(b, t, self.hidden_dim).float() / 10.0
+        return (self.linear(hidden),)
+
+
 class MockCausalLMWithHead(torch.nn.Module):
     """Architecture mimicking CausalLM (base model .model + .lm_head)."""
 
@@ -156,15 +168,11 @@ class MockCausalLMWithHead(torch.nn.Module):
         self.hidden_dim = hidden_dim
         self.vocab_size = vocab_size
 
-        # A non-trivial base model transformation
-        self.model = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.model = MockBaseModel(hidden_dim)
         self.lm_head = torch.nn.Linear(hidden_dim, vocab_size, bias=False)
 
     def forward(self, input_ids=None, attention_mask=None, use_cache=None, **kwargs):
-        b, t = input_ids.shape
-        # Deterministic hidden representation from input_ids
-        hidden = input_ids.unsqueeze(-1).expand(b, t, self.hidden_dim).float() / 10.0
-        hidden = self.model(hidden)
+        hidden = self.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=use_cache)[0]
         logits = self.lm_head(hidden)
         cap = getattr(self.config, "final_logit_softcapping", None)
         if cap:
