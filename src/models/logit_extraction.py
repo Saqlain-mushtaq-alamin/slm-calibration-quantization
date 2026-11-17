@@ -98,7 +98,13 @@ def answer_logits_batched(
     try:
         input_ids_list: list[list[int]] = []
         for p in prompts:
-            ids = tokenizer.encode(p, add_special_tokens=False) if hasattr(tokenizer, "encode") else tokenizer(p, add_special_tokens=False)["input_ids"]
+            tok_out = tokenizer(p, add_special_tokens=False)
+            ids = tok_out["input_ids"] if isinstance(tok_out, dict) else tok_out
+            if isinstance(ids, torch.Tensor):
+                ids = ids.squeeze(0).tolist() if ids.ndim > 1 else ids.tolist()
+            elif isinstance(ids, list) and ids and isinstance(ids[0], list):
+                ids = ids[0]
+            ids = list(ids)
             if bos_id is not None:
                 budget = max_len - 1
                 if len(ids) > budget:
