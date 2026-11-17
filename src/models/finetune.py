@@ -262,6 +262,11 @@ def set_interrupted(val: bool = True) -> None:
     _INTERRUPTED = val
 
 
+def is_interrupted() -> bool:
+    global _INTERRUPTED
+    return _INTERRUPTED
+
+
 def merge_adapter_to_base(
     hf_id: str,
     adapter_dir: Path | str,

@@ -11,7 +11,12 @@ from src.models.finetune import (
     default_target_modules,
     finetune_lora,
     frame_to_examples,
+    is_interrupted,
     label_token_ids,
+    load_base_model,
+    load_tokenizer,
+    merge_adapter_to_base,
+    set_interrupted,
     subsample,
 )
 from src.models.logit_extraction import (
