@@ -132,6 +132,71 @@ def test_left_truncation_keeps_answer_position_and_restores_setting():
     assert lh[0] == pytest.approx(3 + 0.001 * HATE_ID, abs=1e-4)
 
 
+class FakeTokenizerWithBOS(FakeTokenizer):
+    def __init__(self, bos_token_id: int = 128000, truncation_side: str = "right") -> None:
+        super().__init__(truncation_side=truncation_side)
+        self.bos_token_id = bos_token_id
+
+
+def test_bos_token_prepended_and_preserved_in_eval():
+    tok = FakeTokenizerWithBOS(bos_token_id=99)
+    # prompt length 10, max_len=5 -> budget=4.
+    # tokens should be [99] + prompt_ids[-4:]
+    lh, _ = lx.answer_logits_batched(PositionEchoModel(), tok, ["abcdefghij"], HATE_ID, NONHATE_ID, max_len=5)
+    # The last position in a sequence of length 5 is index 4
+    assert lh[0] == pytest.approx(4 + 0.001 * HATE_ID, abs=1e-4)
+
+
+class MockCausalLMWithHead(torch.nn.Module):
+    """Architecture mimicking CausalLM (base model .model + .lm_head)."""
+
+    def __init__(self, vocab_size: int = 32, hidden_dim: int = 16, softcapping: float | None = 30.0):
+        super().__init__()
+        self.config = SimpleNamespace(final_logit_softcapping=softcapping)
+        self.hidden_dim = hidden_dim
+        self.vocab_size = vocab_size
+
+        # A non-trivial base model transformation
+        self.model = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.lm_head = torch.nn.Linear(hidden_dim, vocab_size, bias=False)
+
+    def forward(self, input_ids=None, attention_mask=None, use_cache=None, **kwargs):
+        b, t = input_ids.shape
+        # Deterministic hidden representation from input_ids
+        hidden = input_ids.unsqueeze(-1).expand(b, t, self.hidden_dim).float() / 10.0
+        hidden = self.model(hidden)
+        logits = self.lm_head(hidden)
+        cap = getattr(self.config, "final_logit_softcapping", None)
+        if cap:
+            logits = torch.tanh(logits / cap) * cap
+        return SimpleNamespace(logits=logits)
+
+
+def test_shortcut_logits_equals_full_logits_with_softcapping():
+    """Verify that computing logits only at last_real matches the full (batch, seq, vocab) forward pass."""
+    torch.manual_seed(42)
+    model = MockCausalLMWithHead(vocab_size=64, hidden_dim=16, softcapping=30.0)
+    tok = FakeTokenizer()
+    prompts = ["short", "a much longer prompt with more tokens", "medium len"]
+
+    # Compute using lx.answer_logits_batched (which exercises the low-VRAM shortcut)
+    lh_shortcut, ln_shortcut = lx.answer_logits_batched(model, tok, prompts, HATE_ID, NONHATE_ID, max_len=32)
+
+    # Compute ground truth by doing the full forward pass manually
+    enc = tok(prompts, add_special_tokens=False, padding=True, truncation=True, max_length=32, return_tensors="pt")
+    with torch.no_grad():
+        full_out = model(**enc)
+    last_real = enc["attention_mask"].sum(dim=1) - 1
+    rows = torch.arange(full_out.logits.shape[0])
+    full_answer = full_out.logits[rows, last_real, :]
+    full_lh = full_answer[:, HATE_ID].cpu().numpy()
+    full_ln = full_answer[:, NONHATE_ID].cpu().numpy()
+
+    np.testing.assert_allclose(lh_shortcut, full_lh, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(ln_shortcut, full_ln, rtol=1e-5, atol=1e-5)
+
+
+
 # ---------------------------------------------------------------------------
 # Probability helpers
 # ---------------------------------------------------------------------------
