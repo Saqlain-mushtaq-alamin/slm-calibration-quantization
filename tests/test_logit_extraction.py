@@ -191,6 +191,7 @@ def test_shortcut_logits_equals_full_logits_with_softcapping():
     lh_shortcut, ln_shortcut = lx.answer_logits_batched(model, tok, prompts, HATE_ID, NONHATE_ID, max_len=32)
 
     # Compute ground truth by doing the full forward pass manually
+    tok.truncation_side = "left"
     enc = tok(prompts, add_special_tokens=False, padding=True, truncation=True, max_length=32, return_tensors="pt")
     with torch.no_grad():
         full_out = model(**enc)
