@@ -4,8 +4,8 @@ How to run, verify, and interpret Phase 4 of
 *Quantization × Calibration × Selective Prediction for Sub-3B SLMs on Bengali
 Hate-Speech Classification under Domain Shift*.
 
-**Status: code complete and tested (168 passing). Nothing has been trained yet.**
-The 16-run matrix below is ready to launch and takes roughly 25 GPU-hours.
+**Status: code complete and tested (186 passing). Nothing has been trained yet.**
+The 16-run matrix below is ready to launch and takes roughly 25 GPU-hours. Resumability and atomic writes are fully implemented (survives power cuts and Ctrl+C).
 
 ---
 
@@ -127,20 +127,25 @@ run is expected to **fail T4.2/T4.3** — 64 examples and 4 optimiser updates ca
 produce a good classifier. What you are checking is that T4.1, T4.4, T4.5, and T4.6 pass
 and that no model OOMs.
 
+All smoke and capped runs automatically write to a separate isolated smoke root
+(`outputs/*/phase4_smoke/`), so they never touch or contaminate real Phase 4 outputs.
+No manual cleanup is necessary!
+
 ```powershell
 & .venv\Scripts\python.exe scripts\03_finetune.py --smoke
-```
-
-Then clean up so the real sweep cannot mistake smoke output for real results:
-
-```powershell
-Remove-Item -Recurse -Force outputs\models\phase4, outputs\logits\phase4, outputs\runs\phase4
 ```
 
 ### Step 2 — inspect the matrix without touching the GPU
 
 ```powershell
 & .venv\Scripts\python.exe scripts\03_finetune.py --dry-run
+```
+
+To view the live status of every cell in the 16-run matrix (completed stages, checkpoints,
+VRAM, wall-time, and F1):
+
+```powershell
+& .venv\Scripts\python.exe scripts\03_finetune.py --status
 ```
 
 Prints all 16 cells and exits. Verify the count and seed lists match Section 3.
@@ -179,14 +184,15 @@ Expect ~25 GPU-hours. It is safe to interrupt and restart: see Section 6.
 
 | Flag | Effect |
 |---|---|
-| `--smoke` | 64 train / 32 eval rehearsal |
+| `--smoke` | 64 train / 32 eval rehearsal (writes to `outputs/*/phase4_smoke`) |
 | `--models KEYS...` | restrict to these `model_key` values |
 | `--seeds N...` | restrict to these seeds (overrides the tier defaults) |
-| `--max-train N` | cap training examples; `0` = whole frozen split |
-| `--max-eval N` | cap each eval set; also sets `max_val_samples = N // 2` |
+| `--max-train N` | cap training examples; `0` = whole frozen split (writes to `phase4_smoke`) |
+| `--max-eval N` | cap each eval set; also sets `max_val_samples = N // 2` (writes to `phase4_smoke`) |
 | `--split NAME` | override the LOCO split |
 | `--no-keep-merged` | delete the merged BF16 checkpoint after logits |
 | `--force` | re-run cells whose manifest already says `success` |
+| `--status` | display sweep matrix status table and exit |
 | `--dry-run` | print the matrix and exit |
 
 Caps are recorded in every run manifest, so a capped run can never be mistaken for a
@@ -270,20 +276,46 @@ table above.
 
 ---
 
-## 7. Resumability and failure handling
+## 7. Resumability, Atomic Writes, and Power-Cut Recovery
 
-- A cell is skipped only when its manifest says `status: "success"` **and** all three
-  logits parquet files exist. Anything else is retrained.
-- `--force` overrides the skip.
-- A cell that raises is recorded with `status: "failed"` plus `error` and a traceback,
-  and **the sweep continues to the next cell**. Failures are never silently dropped
-  (global rule 6).
-- Exit code is `0` for `passed` / `passed_with_failures` / `dry_run`, `1` otherwise.
-- Summary status is `passed` if all 16 succeed, `passed_with_failures` if some do, and
-  `failed` if none do.
+Phase 4 is built to be safely resumable after a power cut, system crash, or Ctrl+C at **any moment**:
 
-To re-run only the failures, just launch the same command again — successful cells are
-skipped automatically.
+### Exact Command After Power Cut or Interruption
+Simply run the **exact same command** that was interrupted:
+```powershell
+& .venv\Scripts\python.exe scripts\03_finetune.py
+```
+Nothing completed will be retrained, and nothing half-written will be trusted.
+
+### Resumability Architecture
+
+1. **Mid-training Checkpoints (`train.save_steps: 250`)**:
+   - Checkpoints are saved every 250 optimizer steps with `save_total_limit: 2`.
+   - On restart, `find_last_valid_checkpoint()` inspects `trainer_state.json`, `adapter_model.safetensors`, `adapter_config.json`, and optimizer states.
+   - If the latest checkpoint is incomplete or corrupted by a power cut, it automatically falls back to the previous intact checkpoint.
+   - Optimizer, LR scheduler, RNG states, and dataloader positions are restored.
+
+2. **Atomic Writes Everywhere**:
+   - Manifests (`write_run_json`), logit parquets (`atomic_write_parquet`), summary JSON, and metrics CSV are written to temporary files on the same disk volume, flushed and fsynced (`os.fsync`), and atomically swapped into place via `os.replace`.
+   - Power loss mid-write never leaves half-written or unreadable files.
+
+3. **Stage-Level Resume**:
+   - **Training done**: If `adapter/` is valid, fine-tuning is completely skipped.
+   - **Merge interrupted**: If `adapter/` is valid but `merged/` is missing or incomplete, the standalone merged model is rebuilt directly from the adapter without retraining.
+   - **Eval interrupted**: Each split (`id_val`, `id_test`, `ood_test`) is validated individually with `is_valid_parquet()` and row count verification. Completed splits are kept; only missing or corrupted splits are computed.
+   - **Cell completed**: Skipped only if manifest has `status: "success"` **and** matches `config_hash`, `split_sha256`, `resolved_hf_id`, and all 3 parquets exist with valid row counts. (If git commit changed between sessions, it logs a warning but proceeds with the skip).
+
+4. **Graceful Stop (Ctrl+C / SIGINT / SIGBREAK)**:
+   - Handled cleanly via `GracefulStopCallback`. On interruption, it saves the current step checkpoint, logs `"Stopped; re-run the same command to resume"`, and exits cleanly.
+
+5. **Disk Hygiene**:
+   - The large `checkpoints/` directory (optimizer states) is deleted **only after full success** of the cell and manifest generation, saving ~15-20 GB of disk while preserving resume safety during training.
+
+6. **Inspection**:
+   - Inspect sweep progress at any time:
+     ```powershell
+     & .venv\Scripts\python.exe scripts\03_finetune.py --status
+     ```
 
 ---
 
