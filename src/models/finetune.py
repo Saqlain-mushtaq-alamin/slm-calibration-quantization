@@ -518,17 +518,12 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
             "peak_vram_gib": sw.peak_vram_gb,
             "wall_s": sw.wall_s,
             "energy_wh": sw.energy_wh,
+            "trainable_params": trainable,
+            "total_params": total,
+            "n_train": len(train_ds),
+            "n_id_val": len(val_ds),
+            "max_seq_len": max_len,
         },
-    )
-                "trainable_params": trainable,
-                "total_params": total,
-                "n_train": len(train_ds),
-                "n_id_val": len(val_ds),
-                "max_seq_len": max_len,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
     )
 
     return FinetuneResult(
