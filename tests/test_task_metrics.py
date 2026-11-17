@@ -35,7 +35,7 @@ class TestComputeAllTaskMetrics:
         assert m["mcc"] == pytest.approx(-1.0)
 
     def test_matches_sklearn_per_class_f1(self):
-        from sklearn.metrics import f1_score
+        from sklearn.metrics import balanced_accuracy_score, f1_score
 
         rng = np.random.default_rng(0)
         n = 500
@@ -43,6 +43,7 @@ class TestComputeAllTaskMetrics:
         y_prob = rng.uniform(0, 1, n)
         y_pred = (y_prob >= 0.5).astype(int)
         m = compute_all_task_metrics(y_true, y_pred, y_prob)
+        assert m["balanced_accuracy"] == pytest.approx(balanced_accuracy_score(y_true, y_pred))
         assert m["macro_f1"] == pytest.approx(f1_score(y_true, y_pred, average="macro"))
         assert m["hate_f1"] == pytest.approx(f1_score(y_true, y_pred, pos_label=1))
         assert m["nonhate_f1"] == pytest.approx(f1_score(y_true, y_pred, pos_label=0))
