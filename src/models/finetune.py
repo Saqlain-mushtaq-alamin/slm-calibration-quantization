@@ -73,32 +73,47 @@ class VerbalizedSFTDataset(Dataset):
         tokenizer: Any,
         max_len: int = 256,
         template: str = DEFAULT_PROMPT_TEMPLATE,
+        verbalizer: Mapping[str, str] | None = None,
     ) -> None:
         self.examples = list(examples)
         self.tokenizer = tokenizer
         self.max_len = max_len
         self.template = template
-        self.label_token_ids = label_token_ids(tokenizer, DEFAULT_VERBALIZER)
+        self.verbalizer = verbalizer or DEFAULT_VERBALIZER
+        self.label_token_ids = label_token_ids(tokenizer, self.verbalizer)
 
     def __len__(self) -> int:
         return len(self.examples)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         ex = self.examples[idx]
-        prompt_ids = self.tokenizer(ex.prompt, add_special_tokens=False)["input_ids"]
+        tok_out = self.tokenizer(ex.prompt, add_special_tokens=False)
+        raw_ids = tok_out["input_ids"] if isinstance(tok_out, dict) else tok_out
+        if isinstance(raw_ids, torch.Tensor):
+            raw_ids = raw_ids.squeeze(0).tolist() if raw_ids.ndim > 1 else raw_ids.tolist()
+        elif isinstance(raw_ids, list) and raw_ids and isinstance(raw_ids[0], list):
+            raw_ids = raw_ids[0]
+        raw_ids = list(raw_ids)
+
         answer_ids = [self.label_token_ids[int(ex.label)]]
-        # Truncate the prompt from the LEFT so the answer slot is always kept.
-        budget = self.max_len - len(answer_ids)
-        if len(prompt_ids) > budget:
-            prompt_ids = prompt_ids[:1] + prompt_ids[-(budget - 1) :]
+        bos_id = getattr(self.tokenizer, "bos_token_id", None)
+        if bos_id is not None:
+            budget = self.max_len - len(answer_ids) - 1
+            if len(raw_ids) > budget:
+                raw_ids = raw_ids[-budget:] if budget > 0 else []
+            prompt_ids = [bos_id] + raw_ids
+        else:
+            budget = self.max_len - len(answer_ids)
+            if len(raw_ids) > budget:
+                raw_ids = raw_ids[-budget:] if budget > 0 else []
+            prompt_ids = raw_ids
+
         input_ids = prompt_ids + answer_ids
         labels = [-100] * len(prompt_ids) + answer_ids
         return {
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": [1] * len(input_ids),
-            "example_id": ex.example_id,
-            "label": int(ex.label),
         }
 
 
@@ -115,8 +130,6 @@ class SFTCollator:
             "input_ids": [],
             "attention_mask": [],
             "labels": [],
-            "example_id": [f["example_id"] for f in features],
-            "label": [f["label"] for f in features],
         }
         for f in features:
             pad = max_len - len(f["input_ids"])
@@ -124,7 +137,7 @@ class SFTCollator:
             batch["attention_mask"].append(f["attention_mask"] + [0] * pad)
             batch["labels"].append(f["labels"] + [self.label_pad_token_id] * pad)
         out = {
-            k: (torch.tensor(v, dtype=torch.long) if k != "example_id" else v)
+            k: torch.tensor(v, dtype=torch.long)
             for k, v in batch.items()
         }
         out["labels"][out["attention_mask"] == 0] = self.label_pad_token_id
