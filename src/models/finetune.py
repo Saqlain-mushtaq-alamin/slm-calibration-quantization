@@ -361,10 +361,10 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
             model.enable_input_require_grads()
 
         train_ds = VerbalizedSFTDataset(
-            frame_to_examples(train_df, template), tokenizer, max_len=max_len, template=template
+            frame_to_examples(train_df, template), tokenizer, max_len=max_len, template=template, verbalizer=verbalizer
         )
         val_ds = VerbalizedSFTDataset(
-            frame_to_examples(val_df, template), tokenizer, max_len=max_len, template=template
+            frame_to_examples(val_df, template), tokenizer, max_len=max_len, template=template, verbalizer=verbalizer
         )
         collator = SFTCollator(pad_token_id=tokenizer.pad_token_id)
 
@@ -377,8 +377,63 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
         total_updates = max(1, int(steps_per_epoch * epochs))
         configured_logging = int(train_cfg.get("logging_steps", 10))
         logging_steps = max(1, min(configured_logging, total_updates // 5 or 1))
+
+        from transformers import TrainerCallback
+
+        class DivergenceCheckCallback(TrainerCallback):
+            """Stops training immediately if loss is NaN/inf or exceeds max_loss for patience consecutive logged steps."""
+
+            def __init__(self, max_loss: float = 5.0, patience: int = 3):
+                self.max_loss = max_loss
+                self.patience = patience
+                self.consecutive_bad = 0
+                self.diverged = False
+                self.reason = None
+
+            def on_log(self, args, state, control, logs=None, **kwargs):
+                if logs and "loss" in logs:
+                    loss = logs["loss"]
+                    if not math.isfinite(loss):
+                        self.diverged = True
+                        self.reason = f"Loss became non-finite ({loss}) at step {state.global_step}"
+                        control.should_training_stop = True
+                    elif loss > self.max_loss:
+                        self.consecutive_bad += 1
+                        if self.consecutive_bad >= self.patience:
+                            self.diverged = True
+                            self.reason = f"Loss exceeded {self.max_loss} for {self.consecutive_bad} consecutive logged steps at step {state.global_step}"
+                            control.should_training_stop = True
+                    else:
+                        self.consecutive_bad = 0
+
+        class GracefulStopCallback(TrainerCallback):
+            """Saves checkpoint and stops training when a stop signal (Ctrl+C) is received."""
+
+            def on_step_end(self, args, state, control, **kwargs):
+                global _INTERRUPTED
+                if _INTERRUPTED:
+                    LOG.warning("Graceful stop requested; requesting checkpoint save and stopping training at step %d", state.global_step)
+                    control.should_training_stop = True
+                    control.should_save = True
+
+        max_loss = float(config.get("sanity", {}).get("max_final_train_loss", 5.0))
+        divergence_cb = DivergenceCheckCallback(max_loss=max_loss, patience=3)
+        graceful_cb = GracefulStopCallback()
+
+        checkpoints_dir = output_dir / "checkpoints"
+        last_ckpt = find_last_valid_checkpoint(checkpoints_dir)
+        resume_from = str(last_ckpt) if last_ckpt is not None else None
+        if resume_from:
+            LOG.info("Found valid checkpoint to resume from: %s", resume_from)
+
+        save_strategy = str(train_cfg.get("save_strategy", "steps"))
+        save_steps = int(train_cfg.get("save_steps", 250))
+        save_total_limit = int(train_cfg.get("save_total_limit", 2))
+        eval_strategy = str(train_cfg.get("eval_strategy", "no"))
+        load_best_model_at_end = bool(train_cfg.get("load_best_model_at_end", False))
+
         args = TrainingArguments(
-            output_dir=str(output_dir / "checkpoints"),
+            output_dir=str(checkpoints_dir),
             num_train_epochs=epochs,
             per_device_train_batch_size=batch_size,
             per_device_eval_batch_size=int(train_cfg.get("eval_batch_size", 4)),
@@ -390,10 +445,11 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
             max_grad_norm=float(train_cfg.get("max_grad_norm", 1.0)),
             lr_scheduler_type=str(train_cfg.get("lr_scheduler", "cosine")),
             logging_steps=logging_steps,
-            save_strategy=str(train_cfg.get("save_strategy", "epoch")),
-            save_total_limit=int(train_cfg.get("save_total_limit", 2)),
-            eval_strategy=str(train_cfg.get("eval_strategy", "epoch")),
-            load_best_model_at_end=True,
+            save_strategy=save_strategy,
+            save_steps=save_steps,
+            save_total_limit=save_total_limit,
+            eval_strategy=eval_strategy,
+            load_best_model_at_end=load_best_model_at_end,
             metric_for_best_model=str(train_cfg.get("metric_for_best_model", "eval_loss")),
             greater_is_better=False,
             bf16=bool(train_cfg.get("bf16", True)),
@@ -410,11 +466,20 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
             train_dataset=train_ds,
             eval_dataset=val_ds,
             data_collator=collator,
+            callbacks=[divergence_cb, graceful_cb],
         )
-        train_out = trainer.train()
+        train_out = trainer.train(resume_from_checkpoint=resume_from)
+        if divergence_cb.diverged:
+            raise RuntimeError(f"Training diverged: {divergence_cb.reason}")
+        if _INTERRUPTED:
+            LOG.warning("Training stopped gracefully by interrupt at step %d", trainer.state.global_step)
+            raise KeyboardInterrupt("Stopped; re-run the same command to resume")
+
         metrics = trainer.evaluate()
-        trainer.save_model(str(output_dir / "adapter"))
-        tokenizer.save_pretrained(str(output_dir / "adapter"))
+        adapter_dir = output_dir / "adapter"
+        trainer.save_model(str(adapter_dir))
+        tokenizer.save_pretrained(str(adapter_dir))
+        atomic_write_text(adapter_dir / ".completed", "ok\n")
 
         history = [
             {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in step.items()}
@@ -428,6 +493,7 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
         merged.config.use_cache = True
         merged.save_pretrained(str(merged_dir), safe_serialization=True)
         tokenizer.save_pretrained(str(merged_dir))
+        atomic_write_text(merged_dir / ".completed", "ok\n")
 
     train_losses = [h["loss"] for h in history if "loss" in h]
     loss_decreased = bool(
@@ -435,22 +501,25 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
             not math.isfinite(v) for v in train_losses
         )
     )
-    (output_dir / "train_metrics.json").write_text(
-        json.dumps(
-            {
-                "train_runtime_s": float(getattr(train_out.metrics, "train_runtime", sw.wall_s)),
-                "train_samples_per_second": float(
-                    getattr(train_out.metrics, "train_samples_per_second", 0.0) or 0.0
-                ),
-                "eval": {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))},
-                "log_history": history,
-                "label_token_ids": token_ids,
-                "best_checkpoint": best_ckpt,
-                "total_updates": total_updates,
-                "logging_steps": logging_steps,
-                "peak_vram_gib": sw.peak_vram_gb,
-                "wall_s": sw.wall_s,
-                "energy_wh": sw.energy_wh,
+    metrics_dict = train_out.metrics if isinstance(getattr(train_out, "metrics", None), dict) else {}
+    train_runtime = float(metrics_dict.get("train_runtime", sw.wall_s))
+    train_samples_per_s = float(metrics_dict.get("train_samples_per_second", 0.0) or 0.0)
+    atomic_write_json(
+        output_dir / "train_metrics.json",
+        {
+            "train_runtime_s": train_runtime,
+            "train_samples_per_second": train_samples_per_s,
+            "eval": {k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))},
+            "log_history": history,
+            "label_token_ids": token_ids,
+            "best_checkpoint": str(best_ckpt or adapter_dir),
+            "total_updates": total_updates,
+            "logging_steps": logging_steps,
+            "peak_vram_gib": sw.peak_vram_gb,
+            "wall_s": sw.wall_s,
+            "energy_wh": sw.energy_wh,
+        },
+    )
                 "trainable_params": trainable,
                 "total_params": total,
                 "n_train": len(train_ds),

@@ -47,6 +47,17 @@ def resolve_model_id(hf_id: str, mirrors: Sequence[str] = ()) -> tuple[str, list
     )
 
 
+def get_model_commit_sha(model_id: str) -> str | None:
+    """Return the commit SHA / revision of the resolved model from its config."""
+    try:
+        from transformers import AutoConfig
+
+        cfg = AutoConfig.from_pretrained(model_id)
+        return getattr(cfg, "_commit_hash", None)
+    except Exception:
+        return None
+
+
 def build_split_frames(
     df: pd.DataFrame,
     spec: Mapping[str, Any],
