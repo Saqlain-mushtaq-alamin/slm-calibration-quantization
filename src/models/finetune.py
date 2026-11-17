@@ -302,7 +302,10 @@ def load_tokenizer(hf_id: str):
     return tok
 
 
-class DivergenceCheckCallback:
+from transformers import TrainerCallback
+
+
+class DivergenceCheckCallback(TrainerCallback):
     """Stops training immediately if loss is NaN/inf or exceeds max_loss for patience consecutive logged steps."""
 
     def __init__(self, max_loss: float = 5.0, patience: int = 3):
@@ -329,7 +332,7 @@ class DivergenceCheckCallback:
                 self.consecutive_bad = 0
 
 
-class GracefulStopCallback:
+class GracefulStopCallback(TrainerCallback):
     """Saves checkpoint and stops training when a stop signal (Ctrl+C) is received."""
 
     def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
