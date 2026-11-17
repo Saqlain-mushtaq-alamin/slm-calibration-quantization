@@ -95,3 +95,100 @@ def test_frame_to_examples_and_eval_examples_agree():
     assert [e.example_id for e in sft] == [e["example_id"] for e in ev]
     assert sft[0].prompt == ev[0]["prompt"]
     assert [e.label for e in sft] == [e["y_true"] for e in ev]
+
+
+class _DummyTokenizer:
+    def __init__(self, bos_token_id: int | None = 128000):
+        self.bos_token_id = bos_token_id
+        self.pad_token_id = 0
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        if " X" in text or text == " X":
+            return [10]
+        if " Y" in text or text == " Y":
+            return [20]
+        # Return deterministic tokens based on character ordinals
+        return [100 + (ord(c) % 50) for c in text]
+
+
+def test_verbalized_sft_dataset_prepends_bos_and_respects_custom_verbalizer():
+    tok = _DummyTokenizer(bos_token_id=128000)
+    examples = [
+        ft.TrainingExample(example_id="1", prompt="Hello world", label=0),
+        ft.TrainingExample(example_id="2", prompt="Test prompt", label=1),
+    ]
+    ds = ft.VerbalizedSFTDataset(
+        examples,
+        tok,
+        max_seq_len=64,
+        verbalizer={0: " X", 1: " Y"},
+    )
+    # Check BOS is prepended
+    assert ds[0]["input_ids"][0] == 128000
+    assert ds[1]["input_ids"][0] == 128000
+    # Check label tokens match custom verbalizer
+    assert ds[0]["input_ids"][-1] == 10
+    assert ds[1]["input_ids"][-1] == 20
+    # Check target position is masked except last
+    assert ds[0]["labels"][-1] == 10
+    assert ds[0]["labels"][-2] == -100
+
+    # Test truncation keeps BOS at index 0
+    ds_trunc = ft.VerbalizedSFTDataset(
+        examples,
+        tok,
+        max_seq_len=6,
+        verbalizer={0: " X", 1: " Y"},
+    )
+    assert len(ds_trunc[0]["input_ids"]) == 6
+    assert ds_trunc[0]["input_ids"][0] == 128000
+    assert ds_trunc[0]["input_ids"][-1] == 10
+
+
+def test_sft_collator_hygiene():
+    tok = _DummyTokenizer(bos_token_id=2)
+    collator = ft.SFTCollator(tok)
+    batch_features = [
+        {"input_ids": [2, 101, 10], "labels": [-100, -100, 10], "example_id": "ex1", "extra": "drop_me"},
+        {"input_ids": [2, 102, 103, 20], "labels": [-100, -100, -100, 20], "example_id": "ex2", "extra": "drop_me"},
+    ]
+    batch = collator(batch_features)
+    assert set(batch.keys()) == {"input_ids", "attention_mask", "labels"}
+    assert "example_id" not in batch
+    assert "extra" not in batch
+    assert batch["input_ids"].shape == (2, 4)
+    assert batch["labels"].shape == (2, 4)
+
+
+def test_load_base_model_cpu_offload_detection(monkeypatch):
+    class MockModel:
+        def __init__(self):
+            self.hf_device_map = {"model.embed_tokens": "cuda:0", "model.layers.0": "cpu"}
+
+    monkeypatch.setattr(
+        "transformers.AutoModelForCausalLM.from_pretrained",
+        lambda *args, **kwargs: MockModel(),
+    )
+    with pytest.raises(RuntimeError, match="offloaded to CPU or disk"):
+        ft.load_base_model("dummy_path", "bfloat16")
+
+
+def test_divergence_check_callback():
+    from transformers import TrainerControl, TrainerState, TrainingArguments
+
+    cb = ft.DivergenceCheckCallback(max_final_train_loss=5.0, consecutive_diverged_steps=2)
+    args = TrainingArguments(output_dir="tmp_dummy")
+    state = TrainerState()
+    control = TrainerControl()
+
+    # Step 1: normal loss
+    cb.on_log(args, state, control, logs={"loss": 2.0})
+    assert control.should_training_stop is False
+
+    # Step 2: loss > max_loss (1st time)
+    cb.on_log(args, state, control, logs={"loss": 6.0})
+    assert control.should_training_stop is False
+
+    # Step 3: loss > max_loss (2nd consecutive time) -> should stop!
+    cb.on_log(args, state, control, logs={"loss": 6.5})
+    assert control.should_training_stop is True
