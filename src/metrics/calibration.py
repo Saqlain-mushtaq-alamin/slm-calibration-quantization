@@ -160,9 +160,9 @@ def confidence_gap(y_true: Any, y_prob: Any) -> float:
     Positive => overconfident; negative => underconfident.
     """
     yt, yp = _validate(y_true, y_prob)
-    confidence = np.where(yt == 1, yp, 1.0 - yp)
-    accuracy = (np.round(yp) == yt).mean()
-    return float(confidence.mean() - accuracy)
+    top_confidence = np.maximum(yp, 1.0 - yp)
+    accuracy = ((yp >= 0.5) == yt).mean()
+    return float(top_confidence.mean() - accuracy)
 
 
 def reliability_diagram(
