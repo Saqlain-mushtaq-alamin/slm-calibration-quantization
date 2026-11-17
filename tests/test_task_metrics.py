@@ -19,6 +19,7 @@ class TestComputeAllTaskMetrics:
         y_prob = np.array([0.01, 0.02, 0.98, 0.99, 0.05, 0.95])
         m = compute_all_task_metrics(y_true, y_pred, y_prob)
         assert m["accuracy"] == pytest.approx(1.0)
+        assert m["balanced_accuracy"] == pytest.approx(1.0)
         assert m["macro_f1"] == pytest.approx(1.0)
         assert m["hate_f1"] == pytest.approx(1.0)
         assert m["mcc"] == pytest.approx(1.0)
