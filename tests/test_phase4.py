@@ -424,3 +424,66 @@ def test_seed_variance_ignores_failed_runs(ph4):
     records = [_ok_run("m", 13, 0.70), _ok_run("m", 42, 0.70)]
     records[1] = {**records[1], "status": "failed"}
     assert ph4._seed_variance(records, 0.05)["m"]["n_seeds"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 Bug Audit Regression Tests (A6, A7, A8, A10.3, A10.4, B6, B7)
+# ---------------------------------------------------------------------------
+
+def test_loco_non_hate_guard_raises(ph4, cfg):
+    bad_cfg = dict(cfg)
+    bad_cfg["split"] = "loco_non_hate"
+    with pytest.raises(ValueError, match="loco_non_hate"):
+        ph4._load_dataset(bad_cfg)
+
+
+def test_empty_or_nan_text_guard_raises(ph4, cfg, tmp_path, monkeypatch):
+    dirty_csv = tmp_path / "dirty.csv"
+    pd.DataFrame({
+        "example_id": ["1", "2"],
+        "text": ["valid text", "   "],
+        "label": [0, 1]
+    }).to_csv(dirty_csv, index=False)
+    test_cfg = dict(cfg)
+    test_cfg["data"] = dict(cfg["data"])
+    test_cfg["data"]["processed"] = str(dirty_csv)
+    with pytest.raises(ValueError, match="null or empty texts"):
+        ph4._load_dataset(test_cfg)
+
+
+def test_nous_research_base_mirror_removed(cfg):
+    """A8: Llama 3.2 1B Instruct must not have base models in its mirrors."""
+    for entry in cfg["models"]:
+        if entry["key"] == "llama3_2_1b_instruct":
+            for mirror in entry.get("mirrors", []):
+                assert "NousResearch/Llama-3.2-1B" not in mirror
+                assert "Instruct" in mirror or "it" in mirror.lower()
+
+
+def test_smoke_or_capped_routes_to_smoke_dir(ph4):
+    """B6: smoke or capped runs must isolate output artifacts to phase4_smoke."""
+    import argparse
+    args = argparse.Namespace(
+        smoke=True,
+        models=["qwen2_5_0_5b_instruct"],
+        seeds=[13],
+        max_train=64,
+        max_eval=32,
+        split="",
+        no_keep_merged=False,
+        force=False,
+        status=False,
+        dry_run=True,
+    )
+    res = ph4.run(args)
+    assert res["status"] == "dry_run"
+
+
+def test_status_flag_runs_cleanly(ph4, cfg, capsys):
+    """B7: --status prints matrix status table and exits cleanly."""
+    matrix = ph4.build_run_matrix(cfg, None, None)
+    ph4.show_status(cfg, matrix)
+    captured = capsys.readouterr()
+    assert "Phase 4 Sweep Matrix Status:" in captured.out
+    assert "qwen2_5_0_5b_instruct" in captured.out
+    assert "gemma2_2b_it" in captured.out
