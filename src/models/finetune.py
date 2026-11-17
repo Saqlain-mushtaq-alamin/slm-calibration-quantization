@@ -419,44 +419,6 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
         configured_logging = int(train_cfg.get("logging_steps", 10))
         logging_steps = max(1, min(configured_logging, total_updates // 5 or 1))
 
-        from transformers import TrainerCallback
-
-        class DivergenceCheckCallback(TrainerCallback):
-            """Stops training immediately if loss is NaN/inf or exceeds max_loss for patience consecutive logged steps."""
-
-            def __init__(self, max_loss: float = 5.0, patience: int = 3):
-                self.max_loss = max_loss
-                self.patience = patience
-                self.consecutive_bad = 0
-                self.diverged = False
-                self.reason = None
-
-            def on_log(self, args, state, control, logs=None, **kwargs):
-                if logs and "loss" in logs:
-                    loss = logs["loss"]
-                    if not math.isfinite(loss):
-                        self.diverged = True
-                        self.reason = f"Loss became non-finite ({loss}) at step {state.global_step}"
-                        control.should_training_stop = True
-                    elif loss > self.max_loss:
-                        self.consecutive_bad += 1
-                        if self.consecutive_bad >= self.patience:
-                            self.diverged = True
-                            self.reason = f"Loss exceeded {self.max_loss} for {self.consecutive_bad} consecutive logged steps at step {state.global_step}"
-                            control.should_training_stop = True
-                    else:
-                        self.consecutive_bad = 0
-
-        class GracefulStopCallback(TrainerCallback):
-            """Saves checkpoint and stops training when a stop signal (Ctrl+C) is received."""
-
-            def on_step_end(self, args, state, control, **kwargs):
-                global _INTERRUPTED
-                if _INTERRUPTED:
-                    LOG.warning("Graceful stop requested; requesting checkpoint save and stopping training at step %d", state.global_step)
-                    control.should_training_stop = True
-                    control.should_save = True
-
         max_loss = float(config.get("sanity", {}).get("max_final_train_loss", 5.0))
         divergence_cb = DivergenceCheckCallback(max_loss=max_loss, patience=3)
         graceful_cb = GracefulStopCallback()
