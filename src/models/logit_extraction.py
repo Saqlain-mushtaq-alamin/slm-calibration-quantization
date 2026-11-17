@@ -90,23 +90,57 @@ def answer_logits_batched(
     device = next(model.parameters()).device
     previous_side = getattr(tokenizer, "truncation_side", "right")
     tokenizer.truncation_side = "left"
+    bos_id = getattr(tokenizer, "bos_token_id", None)
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_token_id is None:
+        pad_token_id = getattr(tokenizer, "eos_token_id", 0)
+
     try:
-        encoded = tokenizer(
-            prompts,
-            add_special_tokens=False,
-            padding=True,
-            truncation=True,
-            max_length=max_len,
-            return_tensors="pt",
-        )
+        input_ids_list: list[list[int]] = []
+        for p in prompts:
+            ids = tokenizer.encode(p, add_special_tokens=False) if hasattr(tokenizer, "encode") else tokenizer(p, add_special_tokens=False)["input_ids"]
+            if bos_id is not None:
+                budget = max_len - 1
+                if len(ids) > budget:
+                    ids = ids[-budget:] if budget > 0 else []
+                ids = [bos_id] + ids
+            else:
+                if len(ids) > max_len:
+                    ids = ids[-max_len:] if max_len > 0 else []
+            input_ids_list.append(ids)
     finally:
         tokenizer.truncation_side = previous_side
-    encoded = {k: v.to(device) for k, v in encoded.items()}
-    with torch.no_grad():
-        out = model(**encoded, use_cache=False)
+
+    max_batch_len = max(len(ids) for ids in input_ids_list)
+    batch_input_ids = []
+    batch_mask = []
+    for ids in input_ids_list:
+        pad_len = max_batch_len - len(ids)
+        batch_input_ids.append(ids + [pad_token_id] * pad_len)
+        batch_mask.append([1] * len(ids) + [0] * pad_len)
+
+    encoded = {
+        "input_ids": torch.tensor(batch_input_ids, dtype=torch.long, device=device),
+        "attention_mask": torch.tensor(batch_mask, dtype=torch.long, device=device),
+    }
     last_real = encoded["attention_mask"].sum(dim=1) - 1
-    rows = torch.arange(out.logits.shape[0], device=out.logits.device)
-    answer = out.logits[rows, last_real, :]
+    rows = torch.arange(encoded["input_ids"].shape[0], device=device)
+
+    base = getattr(model, "model", getattr(model, "transformer", None))
+    if not hasattr(model, "peft_config") and base is not None and hasattr(model, "lm_head") and callable(getattr(model, "lm_head", None)):
+        with torch.no_grad():
+            out = base(**encoded, use_cache=False)
+            hidden = out[0] if isinstance(out, tuple) else getattr(out, "last_hidden_state", out[0])
+            last_hidden = hidden[rows, last_real, :]
+            answer = model.lm_head(last_hidden)
+            cap = getattr(model.config, "final_logit_softcapping", None)
+            if cap:
+                answer = torch.tanh(answer / cap) * cap
+    else:
+        with torch.no_grad():
+            out = model(**encoded, use_cache=False)
+        answer = out.logits[rows, last_real, :]
+
     return (
         answer[:, hate_token_id].float().cpu().numpy(),
         answer[:, nonhate_token_id].float().cpu().numpy(),
@@ -270,13 +304,12 @@ def validate_logits_frame(df: pd.DataFrame, prob_tol: float = 1e-9) -> dict[str,
 
 
 def save_logits(df: pd.DataFrame, path: str | Path, **meta: Any) -> Path:
-    """Persist per-example logits as Parquet (recomputable metrics later)."""
+    """Persist per-example logits as Parquet atomically (recomputable metrics later)."""
     out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
     payload = df.copy()
     for k, v in meta.items():
         payload[k] = v
-    payload.to_parquet(out, index=False)
+    atomic_write_parquet(out, payload)
     LOG.info("Saved logits -> %s (%.2f MB)", out, out.stat().st_size / 1e6)
     return out
 
