@@ -2,6 +2,7 @@
 
 from src.data.assemble import (
     build_split_frames,
+    get_model_commit_sha,
     resolve_model_id,
     split_frame_meta,
     split_sizes,
