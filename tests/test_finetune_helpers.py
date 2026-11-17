@@ -185,7 +185,7 @@ def test_load_base_model_cpu_offload_detection(monkeypatch):
         "transformers.AutoModelForCausalLM.from_pretrained",
         lambda *args, **kwargs: MockModel(),
     )
-    with pytest.raises(RuntimeError, match="offloaded to CPU or disk"):
+    with pytest.raises(RuntimeError, match="Silent CPU/disk offload detected"):
         ft.load_base_model("dummy_path", "bfloat16")
 
 
