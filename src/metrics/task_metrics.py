@@ -8,6 +8,7 @@ import numpy as np
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
+    balanced_accuracy_score,
     f1_score,
     matthews_corrcoef,
     precision_score,
@@ -42,16 +43,7 @@ def compute_all_task_metrics(
     return {
         "n": int(yt.shape[0]),
         "accuracy": _safe(accuracy_score, yt, yp),
-        "balanced_accuracy": _safe(
-            lambda a, b: float(
-                0.5 * ((np.asarray(b) == 1)[np.asarray(a) == 0].mean())
-                + ((np.asarray(b) == 0)[np.asarray(a) == 1].mean())
-            )
-            if np.unique(yt).size == 2
-            else float("nan"),
-            yt,
-            yp,
-        ),
+        "balanced_accuracy": _safe(balanced_accuracy_score, yt, yp) if not single_class else float("nan"),
         "macro_f1": _safe(f1_score, yt, yp, average="macro", zero_division=0),
         "weighted_f1": _safe(f1_score, yt, yp, average="weighted", zero_division=0),
         "hate_f1": _safe(f1_score, yt, yp, pos_label=1, zero_division=0),

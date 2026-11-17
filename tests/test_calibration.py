@@ -170,6 +170,22 @@ class TestConfidenceGap:
         y_true = np.array([0, 0, 0, 0, 0])
         y_prob = np.array([0.9, 0.9, 0.9, 0.9, 0.9])
         assert confidence_gap(y_true, y_prob) > 0
+        # Regression: top-class confidence is 0.9, accuracy is 0.0 -> gap is exactly +0.9
+        assert confidence_gap(y_true, y_prob) == pytest.approx(0.9)
+
+    def test_wrong_confident_predictions_regression(self):
+        # 100% wrong, 80% confident predictions
+        y_true = np.array([0, 1])
+        y_prob = np.array([0.8, 0.2])
+        # top conf = [0.8, 0.8] -> mean 0.8; acc = 0.0 -> gap = 0.8
+        assert confidence_gap(y_true, y_prob) == pytest.approx(0.8)
+
+    def test_boundary_half_accuracy_matches_pipeline(self):
+        # p=0.5 predicts 1 (hate) under p >= 0.5 rule
+        y_true = np.array([1])
+        y_prob = np.array([0.5])
+        # top conf = 0.5, acc = 1.0 -> gap = -0.5
+        assert confidence_gap(y_true, y_prob) == pytest.approx(-0.5)
 
     def test_underconfident_negative(self):
         """All correct, but hesitant forecasts -> negative gap."""
