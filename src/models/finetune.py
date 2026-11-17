@@ -96,7 +96,12 @@ class VerbalizedSFTDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, Any]:
         ex = self.examples[idx]
         tok_out = self.tokenizer(ex.prompt, add_special_tokens=False)
-        raw_ids = tok_out["input_ids"] if isinstance(tok_out, dict) else tok_out
+        if hasattr(tok_out, "input_ids"):
+            raw_ids = tok_out.input_ids
+        elif isinstance(tok_out, Mapping) or hasattr(tok_out, "__getitem__"):
+            raw_ids = tok_out["input_ids"]
+        else:
+            raw_ids = tok_out
         if isinstance(raw_ids, torch.Tensor):
             raw_ids = raw_ids.squeeze(0).tolist() if raw_ids.ndim > 1 else raw_ids.tolist()
         elif isinstance(raw_ids, list) and raw_ids and isinstance(raw_ids[0], list):
