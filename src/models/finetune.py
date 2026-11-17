@@ -254,6 +254,39 @@ def load_base_model(
     return model
 
 
+_INTERRUPTED = False
+
+
+def set_interrupted(val: bool = True) -> None:
+    global _INTERRUPTED
+    _INTERRUPTED = val
+
+
+def merge_adapter_to_base(
+    hf_id: str,
+    adapter_dir: Path | str,
+    merged_dir: Path | str,
+    dtype: str = "bfloat16",
+    attn_implementation: str | None = None,
+) -> Path:
+    """Merge an already saved adapter into base weights without retraining."""
+    from peft import PeftModel
+
+    mdir = Path(merged_dir)
+    mdir.mkdir(parents=True, exist_ok=True)
+    LOG.info("Merging adapter %s into base model %s -> %s", adapter_dir, hf_id, mdir)
+    base = load_base_model(hf_id, dtype=dtype, attn_implementation=attn_implementation)
+    peft_model = PeftModel.from_pretrained(base, str(adapter_dir))
+    merged = peft_model.merge_and_unload()
+    merged.config.use_cache = True
+    merged.save_pretrained(str(mdir), safe_serialization=True)
+    tok = load_tokenizer(hf_id)
+    tok.save_pretrained(str(mdir))
+    atomic_write_text(mdir / ".completed", "ok\n")
+    LOG.info("Merged model saved successfully -> %s", mdir)
+    return mdir
+
+
 def load_tokenizer(hf_id: str):
     from transformers import AutoTokenizer
 
