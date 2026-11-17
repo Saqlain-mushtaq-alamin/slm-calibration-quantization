@@ -123,7 +123,7 @@ def test_verbalized_sft_dataset_prepends_bos_and_respects_custom_verbalizer():
         examples,
         tok,
         max_len=64,
-        verbalizer={"0": " X", "1": " Y"},
+        verbalizer={"nonhate": " X", "hate": " Y"},
     )
     # Check BOS is prepended
     assert ds[0]["input_ids"][0] == 128000
@@ -140,7 +140,7 @@ def test_verbalized_sft_dataset_prepends_bos_and_respects_custom_verbalizer():
         examples,
         tok,
         max_len=6,
-        verbalizer={"0": " X", "1": " Y"},
+        verbalizer={"nonhate": " X", "hate": " Y"},
     )
     assert len(ds_trunc[0]["input_ids"]) == 6
     assert ds_trunc[0]["input_ids"][0] == 128000
