@@ -22,6 +22,14 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from src.utils.atomic import (
+    atomic_write_json,
+    atomic_write_text,
+    find_last_valid_checkpoint,
+    is_valid_adapter,
+    is_valid_merged,
+)
+
 LOG = logging.getLogger("slm-calib.finetune")
 
 DEFAULT_PROMPT_TEMPLATE = (
@@ -201,14 +209,13 @@ class FinetuneResult:
 def load_base_model(
     hf_id: str,
     dtype: str = "bfloat16",
-    device_map: str | None = "auto",
+    device_map: Any = None,
     attn_implementation: str | None = None,
 ):
     """Load a causal LM in the requested dtype.
 
-    ``attn_implementation`` must be ``"eager"`` for Gemma-2: its sliding-window
-    attention and logit soft-capping are not handled correctly by the fused sdpa /
-    flash kernels, and transformers warns about this at load time.
+    device_map defaults to {"": 0} on CUDA to prevent silent CPU offloading,
+    and fails loudly if the model does not fit in VRAM (A2).
     """
     from transformers import AutoModelForCausalLM
 
@@ -222,12 +229,28 @@ def load_base_model(
     }[dtype.lower()]
 
     kwargs: dict[str, Any] = {"torch_dtype": torch_dtype}
-    if device_map:
+    if device_map is None or device_map == "auto":
+        kwargs["device_map"] = {"": 0} if torch.cuda.is_available() else None
+    else:
         kwargs["device_map"] = device_map
+
     if attn_implementation:
         kwargs["attn_implementation"] = attn_implementation
     model = AutoModelForCausalLM.from_pretrained(hf_id, **kwargs)
     model.config.use_cache = False
+
+    # A2: Fail loudly if any layer was silently offloaded to CPU or disk
+    if hasattr(model, "hf_device_map") and model.hf_device_map:
+        cpu_disk_offloaded = {
+            k: v for k, v in model.hf_device_map.items()
+            if str(v).lower() in ("cpu", "disk")
+        }
+        if cpu_disk_offloaded:
+            raise RuntimeError(
+                f"Silent CPU/disk offload detected for {len(cpu_disk_offloaded)} modules in {hf_id}: "
+                f"{list(cpu_disk_offloaded.keys())[:5]}"
+            )
+
     return model
 
 
