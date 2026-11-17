@@ -424,3 +424,4 @@ def test_config_hash_mismatch_refuses_to_skip(ph4, dummy_dataset, tmp_path, monk
     manifest = ph4.run_one(cell, cfg, dummy_dataset, force=False)
     assert not manifest.get("skipped", False), "Run was skipped despite config hash mismatch!"
     assert executed, "Fine-tuning was not executed when config hash changed!"
+
