@@ -297,6 +297,47 @@ def load_tokenizer(hf_id: str):
     return tok
 
 
+class DivergenceCheckCallback:
+    """Stops training immediately if loss is NaN/inf or exceeds max_loss for patience consecutive logged steps."""
+
+    def __init__(self, max_loss: float = 5.0, patience: int = 3):
+        self.max_loss = max_loss
+        self.patience = patience
+        self.consecutive_bad = 0
+        self.diverged = False
+        self.reason = None
+
+    def on_log(self, args: Any, state: Any, control: Any, logs: dict[str, Any] | None = None, **kwargs: Any) -> None:
+        if logs and "loss" in logs:
+            loss = logs["loss"]
+            if not math.isfinite(loss):
+                self.diverged = True
+                self.reason = f"Loss became non-finite ({loss}) at step {getattr(state, 'global_step', '?')}"
+                control.should_training_stop = True
+            elif loss > self.max_loss:
+                self.consecutive_bad += 1
+                if self.consecutive_bad >= self.patience:
+                    self.diverged = True
+                    self.reason = f"Loss exceeded {self.max_loss} for {self.consecutive_bad} consecutive logged steps at step {getattr(state, 'global_step', '?')}"
+                    control.should_training_stop = True
+            else:
+                self.consecutive_bad = 0
+
+
+class GracefulStopCallback:
+    """Saves checkpoint and stops training when a stop signal (Ctrl+C) is received."""
+
+    def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
+        global _INTERRUPTED
+        if _INTERRUPTED:
+            LOG.warning(
+                "Graceful stop requested; requesting checkpoint save and stopping training at step %d",
+                getattr(state, "global_step", -1),
+            )
+            control.should_training_stop = True
+            control.should_save = True
+
+
 def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.DataFrame) -> FinetuneResult:
     """LoRA fine-tune a causal LM with completion-only loss.
 
