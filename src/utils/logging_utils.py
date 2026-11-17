@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 
+from src.utils.atomic import atomic_write_json
+
+
 def setup_logging(level: int = logging.INFO) -> logging.Logger:
     """Configure root logger for console output."""
     logging.basicConfig(
@@ -51,6 +54,5 @@ def write_run_json(
         run.update(payload)
 
     out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(run, indent=2, default=str), encoding="utf-8")
+    atomic_write_json(out, run)
     return run
