@@ -50,7 +50,7 @@ def atomic_write_parquet(path: str | Path, df: pd.DataFrame, **kwargs) -> Path:
     try:
         df.to_parquet(tmp_path, index=False, **kwargs)
         # Ensure data is flushed to disk
-        with open(tmp_path, "rb") as f:
+        with open(tmp_path, "a+b") as f:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, dest)
@@ -70,7 +70,7 @@ def atomic_write_csv(path: str | Path, df: pd.DataFrame, index: bool = False, **
     tmp_path = dest.parent / f".{dest.name}.tmp.{os.getpid()}_{uuid.uuid4().hex[:8]}"
     try:
         df.to_csv(tmp_path, index=index, **kwargs)
-        with open(tmp_path, "rb") as f:
+        with open(tmp_path, "a+b") as f:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, dest)
