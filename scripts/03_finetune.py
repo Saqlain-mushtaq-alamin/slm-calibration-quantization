@@ -898,17 +898,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.no_keep_merged:
         overrides.append("keep_merged=false")
 
-    cfg = load_config(CFG_PATH, overrides)
+    cfg_file = (
+        _resolve(args.config)
+        if getattr(args, "config", None)
+        else (ENGLISH_CFG_PATH if (getattr(args, "english", False) or getattr(args, "language", "") == "en") else DEFAULT_CFG_PATH)
+    )
+    cfg = load_config(cfg_file, overrides)
+    phase = int(cfg.get("phase", 4))
+    lang = str(cfg.get("language", "bn"))
+    is_phase5 = bool(phase == 5 or lang == "en")
+    phase_tag = f"phase{phase}"
 
     # Separate smoke/capped output root (B6)
     is_smoke_or_capped = bool(args.smoke or args.max_train or args.max_eval)
     if is_smoke_or_capped:
-        cfg["paths"]["runs"] = "outputs/runs/phase4_smoke"
-        cfg["paths"]["models"] = "outputs/models/phase4_smoke"
-        cfg["paths"]["logits"] = "outputs/logits/phase4_smoke"
-        cfg["paths"]["results"] = "outputs/results/phase4_smoke"
-        cfg["paths"]["metrics_csv"] = "outputs/results/phase4_smoke/phase4_metrics.csv"
-        cfg["paths"]["summary"] = "outputs/results/phase4_smoke/phase4_summary.json"
+        cfg["paths"]["runs"] = f"outputs/runs/{phase_tag}_smoke"
+        cfg["paths"]["models"] = f"outputs/models/{phase_tag}_smoke"
+        cfg["paths"]["logits"] = f"outputs/logits/{phase_tag}_smoke"
+        cfg["paths"]["results"] = f"outputs/results/{phase_tag}_smoke"
+        cfg["paths"]["metrics_csv"] = f"outputs/results/{phase_tag}_smoke/{phase_tag}_metrics.csv"
+        cfg["paths"]["summary"] = f"outputs/results/{phase_tag}_smoke/{phase_tag}_summary.json"
 
     matrix = build_run_matrix(cfg, args.models or None, args.seeds or None)
     if not matrix:
@@ -918,7 +927,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         show_status(cfg, matrix)
         return {"status": "status_displayed", "matrix_size": len(matrix)}
 
-    LOG.info("Phase 4 run matrix (%d cells):", len(matrix))
+    LOG.info("Phase %d run matrix (%d cells):", phase, len(matrix))
     for cell in matrix:
         LOG.info("  %-46s seed=%-5d tier=%s", cell["run_name"], cell["seed"], cell["tier"])
 
@@ -926,7 +935,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {"status": "dry_run", "matrix": [c["run_name"] for c in matrix]}
 
     if not torch.cuda.is_available():
-        LOG.warning("CUDA unavailable; Phase 4 is GPU-bound and will be extremely slow")
+        LOG.warning("CUDA unavailable; Phase %d is GPU-bound and will be extremely slow", phase)
 
     df, dataset = _load_dataset(cfg)
     dataset["df"] = df
@@ -956,7 +965,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             cell = dict(cell)
             cell["resolved_hf_id"], cell["mirror_notes"] = resolved[cell["model_key"]]
             LOG.info("--- [%d/%d] %s ---", i, len(matrix), cell["run_name"])
-            records.append(run_one(cell, cfg, dataset, force=args.force))
+            records.append(run_one(cell, cfg, dataset, force=args.force, cfg_path=cfg_file))
     except KeyboardInterrupt:
         stopped_early = True
         LOG.warning("Execution stopped; re-run the same command to resume.")
@@ -1014,29 +1023,52 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     table_path = _resolve(cfg["paths"]["metrics_csv"])
     atomic_write_csv(table_path, table)
 
+    tests_dict = {
+        "T4.1": bool(succeeded) and all((r.get("T4.1") or {}).get("passed") for r in succeeded),
+        "T4.2": bool(succeeded) and all((r.get("T4.2") or {}).get("passed") for r in succeeded),
+        "T4.3": bool(succeeded) and all((r.get("T4.3") or {}).get("passed") for r in succeeded),
+        "T4.4": bool(succeeded) and all((r.get("T4.4") or {}).get("passed") for r in succeeded),
+        "T4.5": bool(succeeded) and all((r.get("T4.5") or {}).get("passed") for r in succeeded),
+        "T4.6": bool(succeeded) and all((r.get("T4.6") or {}).get("passed") for r in succeeded),
+        "T4.7": bool(succeeded) and all(
+            (r.get("git_commit") is not None and r.get("config_hash") and r.get("seed") is not None)
+            for r in succeeded
+        ),
+        "T4.8": bool(succeeded) and t4_8_detail["same_split_for_all"] and t4_8_detail["same_train_size_for_all"],
+        "T4.9": bool(variance)
+        and all(v["passed"] for v in variance.values() if v["passed"] is not None)
+        and all(v["n_seeds"] > 1 for v in variance.values()),
+    }
+
+    matching_result = None
+    t5_3_detail = None
+    t5_4_detail = None
+    if is_phase5:
+        matching_result = verify_english_control_matching()
+        matching_path = _resolve(cfg["paths"].get("matching_verification", "outputs/results/english_control_matching.json"))
+        matching_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(matching_path, matching_result)
+
+        t5_3_detail = check_english_vs_bengali_f1(succeeded, ROOT / "outputs" / "results" / "phase4_summary.json")
+        t5_4_detail = check_english_shift_magnitude_documented(ROOT / "outputs" / "results" / "shift_magnitudes.csv")
+
+        tests_dict["T5.1"] = matching_result.get("passed", False)
+        tests_dict["T5.2"] = bool(succeeded) and all(
+            all((r.get(k) or {}).get("passed") for k in ("T4.1", "T4.2", "T4.3", "T4.4", "T4.5", "T4.6"))
+            for r in succeeded
+        )
+        tests_dict["T5.3"] = t5_3_detail.get("passed")
+        tests_dict["T5.4"] = t5_4_detail.get("passed", False)
+
     summary = {
-        "phase": 4,
+        "phase": phase,
+        "phase_name": "english_control_fine_tuning" if is_phase5 else "baseline_fine_tuning_all_models_bengali",
         "status": "passed" if not failed else ("passed_with_failures" if succeeded else "failed"),
         "n_cells": len(records),
         "n_success": len(succeeded),
         "n_failed": len(failed),
         "failed_runs": {r["run_name"]: r.get("error") for r in failed},
-        "tests": {
-            "T4.1": bool(succeeded) and all((r.get("T4.1") or {}).get("passed") for r in succeeded),
-            "T4.2": bool(succeeded) and all((r.get("T4.2") or {}).get("passed") for r in succeeded),
-            "T4.3": bool(succeeded) and all((r.get("T4.3") or {}).get("passed") for r in succeeded),
-            "T4.4": bool(succeeded) and all((r.get("T4.4") or {}).get("passed") for r in succeeded),
-            "T4.5": bool(succeeded) and all((r.get("T4.5") or {}).get("passed") for r in succeeded),
-            "T4.6": bool(succeeded) and all((r.get("T4.6") or {}).get("passed") for r in succeeded),
-            "T4.7": bool(succeeded) and all(
-                (r.get("git_commit") is not None and r.get("config_hash") and r.get("seed") is not None)
-                for r in succeeded
-            ),
-            "T4.8": bool(succeeded) and t4_8_detail["same_split_for_all"] and t4_8_detail["same_train_size_for_all"],
-            "T4.9": bool(variance)
-            and all(v["passed"] for v in variance.values() if v["passed"] is not None)
-            and all(v["n_seeds"] > 1 for v in variance.values()),
-        },
+        "tests": tests_dict,
         "T4.8_detail": t4_8_detail,
         "seed_variance": variance,
         "metrics_csv": _dev(table_path),
@@ -1054,6 +1086,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             for r in records
         ],
     }
+    if is_phase5:
+        summary["matching_verification"] = matching_result
+        summary["T5.3_detail"] = t5_3_detail
+        summary["T5.4_detail"] = t5_4_detail
+
     summary_path = _resolve(cfg["paths"]["summary"])
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_json(summary_path, summary)
@@ -1062,6 +1099,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         json.dumps(
             {
                 "status": summary["status"],
+                "phase": summary["phase"],
                 "n_success": summary["n_success"],
                 "n_failed": summary["n_failed"],
                 "failed_runs": summary["failed_runs"],
@@ -1075,7 +1113,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Phase 4 baseline fine-tuning (Bengali, all models)")
+    parser = argparse.ArgumentParser(description="Baseline fine-tuning: Phase 4 (Bengali) / Phase 5 (English control)")
+    parser.add_argument("--config", type=str, default="", help="custom config YAML path")
+    parser.add_argument("--english", action="store_true", help="run Phase 5 English control fine-tuning")
+    parser.add_argument("--language", type=str, default="", help="language override ('bn' or 'en')")
     parser.add_argument("--smoke", action="store_true", help="64 train / 32 eval rehearsal")
     parser.add_argument("--models", nargs="+", default=[], help="restrict to these model keys")
     parser.add_argument("--seeds", nargs="+", type=int, default=[], help="restrict to these seeds")
