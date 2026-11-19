@@ -369,10 +369,15 @@ def _standardize_toxigen(df: pd.DataFrame) -> pd.DataFrame:
     )
     domain = domain.replace({"nan": "unspecified", "None": "unspecified", "": "unspecified"})
 
+    clean_text = df[text_col].astype(str)
+    empty_mask = clean_text.str.strip() == ""
+    if empty_mask.any():
+        clean_text = clean_text.mask(empty_mask, "[empty]")
+
     out = pd.DataFrame(
         {
             "example_id": [f"toxigen_{i}" for i in range(len(df))],
-            "text": df[text_col].astype(str),
+            "text": clean_text,
             "label": label.astype(int),
             "domain": domain.values,
             "language": "en",
@@ -554,3 +559,132 @@ def write_english_control_decision(
 
     path.write_text(json.dumps(decision, indent=2, default=_default), encoding="utf-8")
     return path
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: English Control Matching Verification (Task 5.2 / T5.1, T5.4)
+# ---------------------------------------------------------------------------
+
+def load_dataset_stats(
+    lang: str = "bn",
+    *,
+    processed_dir: str | Path | None = None,
+    results_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Load dataset statistics for Bengali or English control dataset.
+
+    Returns dict containing:
+        n: total sample count
+        hate_rate: proportion of hate speech (class 1)
+        n_domains: number of distinct domain categories
+        mean_mmd: mean MMD shift magnitude from shift_magnitudes.csv
+    """
+    root = Path(__file__).resolve().parents[2]
+    proc_dir = Path(processed_dir) if processed_dir else root / "data" / "processed"
+    res_dir = Path(results_dir) if results_dir else root / "outputs" / "results"
+
+    if lang == "bn":
+        csv_path = proc_dir / "bd_shs_processed.csv"
+        df = pd.read_csv(csv_path)
+        n = int(len(df))
+        hate_rate = float(df["label"].mean())
+        n_domains = int(df["domain"].nunique())
+
+        mean_mmd = None
+        shift_csv = res_dir / "shift_magnitudes.csv"
+        if shift_csv.is_file():
+            try:
+                shift_df = pd.read_csv(shift_csv)
+                bn_rows = shift_df[shift_df["split"].str.startswith("loco_")]
+                if not bn_rows.empty and "mmd" in bn_rows.columns:
+                    mean_mmd = float(bn_rows["mmd"].mean())
+            except Exception:
+                pass
+
+        return {
+            "lang": "bn",
+            "dataset": "bd_shs",
+            "n": n,
+            "hate_rate": hate_rate,
+            "n_domains": n_domains,
+            "mean_mmd": mean_mmd,
+        }
+
+    elif lang == "en":
+        csv_path = proc_dir / "english_control_matched.csv"
+        df = pd.read_csv(csv_path)
+        n = int(len(df))
+        hate_rate = float(df["label"].mean())
+        n_domains = int(df["domain"].nunique())
+
+        mean_mmd = None
+        shift_csv = res_dir / "shift_magnitudes.csv"
+        if shift_csv.is_file():
+            try:
+                shift_df = pd.read_csv(shift_csv)
+                en_rows = shift_df[
+                    shift_df["split"].str.startswith("english_")
+                    | shift_df["source_domain"].str.startswith("english_")
+                    | shift_df["split"].isin(["loco_asian", "loco_black", "loco_lgbtq"])
+                ]
+                if not en_rows.empty and "mmd" in en_rows.columns:
+                    mean_mmd = float(en_rows["mmd"].mean())
+            except Exception:
+                pass
+
+        return {
+            "lang": "en",
+            "dataset": "toxigen",
+            "n": n,
+            "hate_rate": hate_rate,
+            "n_domains": n_domains,
+            "mean_mmd": mean_mmd,
+        }
+    else:
+        raise ValueError(f"Unsupported language {lang!r}; expected 'bn' or 'en'")
+
+
+def verify_english_control_matching(
+    bn_stats: dict[str, Any] | None = None,
+    en_stats: dict[str, Any] | None = None,
+    *,
+    processed_dir: str | Path | None = None,
+    results_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Verify English control is properly matched to Bengali (Phase 5 Task 5.2 / T5.1)."""
+    if bn_stats is None:
+        bn_stats = load_dataset_stats("bn", processed_dir=processed_dir, results_dir=results_dir)
+    if en_stats is None:
+        en_stats = load_dataset_stats("en", processed_dir=processed_dir, results_dir=results_dir)
+
+    size_diff_ratio = abs(bn_stats["n"] - en_stats["n"]) / max(bn_stats["n"], 1)
+    prior_diff = abs(bn_stats["hate_rate"] - en_stats["hate_rate"])
+
+    bn_mmd = bn_stats.get("mean_mmd")
+    en_mmd = en_stats.get("mean_mmd")
+    mmd_comparable = None
+    if bn_mmd is not None and en_mmd is not None and bn_mmd > 0:
+        mmd_comparable = bool(abs(bn_mmd - en_mmd) / bn_mmd < 0.5)
+
+    checks = {
+        "size_within_10pct": bool(size_diff_ratio < 0.10),
+        "prior_within_2pct": bool(prior_diff < 0.02),
+        "has_shift_axis": bool(en_stats["n_domains"] >= 3),
+        "shift_magnitude_comparable": mmd_comparable,
+    }
+
+    t5_1_passed = bool(
+        checks["size_within_10pct"]
+        and checks["prior_within_2pct"]
+        and checks["has_shift_axis"]
+    )
+
+    return {
+        "bn_stats": bn_stats,
+        "en_stats": en_stats,
+        "size_diff_ratio": float(size_diff_ratio),
+        "prior_diff": float(prior_diff),
+        "checks": checks,
+        "t5_1_passed": t5_1_passed,
+        "passed": t5_1_passed,
+    }

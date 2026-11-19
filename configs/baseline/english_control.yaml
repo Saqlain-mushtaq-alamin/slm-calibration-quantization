@@ -1,0 +1,108 @@
+# Phase 5 — English control fine-tuning: all models, LoRA BF16, multi-seed.
+#
+# Enables the language x quantization interaction test (RQ3, H3).
+# All hyperparameters are identical to Phase 4 (Bengali baseline).
+phase: 5
+language: en
+dataset: toxigen
+split: loco_lgbtq        # primary English LOCO fold (matched domain shift)
+
+# Seeds are fixed by the plan (instruction.md global rule 7).
+seeds:
+  headline: [13, 42, 1234, 2024, 7]
+  secondary: [13, 42, 1234]
+
+# Canonical ids match Phase 4. `meta-llama/*` and `google/gemma-*` are gated and
+# use mirrors for identical weights.
+models:
+  - key: qwen2_5_0_5b_instruct
+    hf_id: Qwen/Qwen2.5-0.5B-Instruct
+    mirrors: []
+    tier: headline
+  - key: qwen2_5_1_5b_instruct
+    hf_id: Qwen/Qwen2.5-1.5B-Instruct
+    mirrors: []
+    tier: headline
+  - key: llama3_2_1b_instruct
+    hf_id: meta-llama/Llama-3.2-1B-Instruct
+    mirrors:
+      - unsloth/Llama-3.2-1B-Instruct
+    tier: secondary
+  - key: gemma2_2b_it
+    hf_id: google/gemma-2-2b-it
+    mirrors:
+      - unsloth/gemma-2-2b-it
+    tier: secondary
+    # Gemma-2 sliding-window attention + logit soft-capping are not handled correctly
+    # by the fused sdpa kernel; transformers warns to use eager.
+    attn_implementation: eager
+
+model:
+  dtype: bfloat16
+  verbalizer:
+    hate: " A"
+    nonhate: " B"
+
+train:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  lr: 2.0e-4
+  epochs: 1
+  batch_size: 2
+  eval_batch_size: 4
+  grad_accum: 8
+  grad_checkpointing: true
+  bf16: true
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  lr_scheduler: cosine
+  max_grad_norm: 1.0
+  logging_steps: 10
+  save_strategy: steps
+  save_steps: 250
+  save_total_limit: 2
+  eval_strategy: "no"
+  load_best_model_at_end: false
+  metric_for_best_model: eval_loss
+  dataloader_workers: 0
+
+data:
+  max_len: 256
+  prompt_template: "Classify the following text as hate speech or not.\nText: {text}\nAnswer:"
+  processed: data/processed/english_control_matched.csv
+  splits: data/splits/english_control_loco_splits.json
+
+# 0 = use the whole frozen split. Caps exist for rehearsal runs.
+caps:
+  max_train_samples: 0
+  max_val_samples: 0
+  max_eval_samples: 0
+
+eval:
+  batch_size: 8
+  ece_bins: 15
+  ece_strategy: equal_width
+  eval_splits: [id_val, id_test, ood_test]
+
+# T5.2 acceptance thresholds (mirroring Phase 4).
+sanity:
+  min_macro_f1_id_test: 0.55
+  require_both_classes_predicted: true
+  prob_sum_tol: 1.0e-6
+  merge_atol: 0.05
+  merge_margin_tol: 1.0
+  max_seed_f1_std: 0.05
+  max_final_train_loss: 5.0
+
+paths:
+  models: outputs/models/phase5
+  logits: outputs/logits/phase5
+  runs: outputs/runs/phase5
+  results: outputs/results
+  summary: outputs/results/phase5_summary.json
+  metrics_csv: outputs/results/phase5_metrics.csv
+  matching_verification: outputs/results/english_control_matching.json
+
+keep_merged: true

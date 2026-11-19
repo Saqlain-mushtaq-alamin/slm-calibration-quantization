@@ -52,6 +52,10 @@ from src.data.assemble import (
     resolve_model_id,
     split_frame_meta,
 )
+from src.data.loader import (
+    load_dataset_stats,
+    verify_english_control_matching,
+)
 from src.data.splits import load_splits
 from src.metrics.aggregate import evaluate_logits_frame, metrics_frame
 from src.models import finetune as ft
@@ -72,7 +76,9 @@ from src.utils.reproducibility import collect_env_snapshot, get_git_commit, set_
 
 LOG = setup_logging()
 
-CFG_PATH = ROOT / "configs" / "baseline" / "default.yaml"
+DEFAULT_CFG_PATH = ROOT / "configs" / "baseline" / "default.yaml"
+ENGLISH_CFG_PATH = ROOT / "configs" / "baseline" / "english_control.yaml"
+CFG_PATH = DEFAULT_CFG_PATH
 
 REQUIRED_LOGIT_COLUMNS = [
     "example_id",
@@ -147,14 +153,16 @@ def _library_versions() -> dict[str, str]:
     return out
 
 
-def run_name(model_key: str, seed: int) -> str:
-    """Canonical run id, e.g. ``bn_qwen2_5_1_5b_instruct_lora_bf16_s42``."""
-    return f"bn_{model_key}_lora_bf16_s{int(seed)}"
+def run_name(model_key: str, seed: int, language: str = "bn") -> str:
+    """Canonical run id, e.g. ``bn_qwen2_5_1_5b_instruct_lora_bf16_s42`` or ``en_...``."""
+    prefix = "en" if language == "en" else "bn"
+    return f"{prefix}_{model_key}_lora_bf16_s{int(seed)}"
 
 
 def build_run_matrix(cfg: Any, models: Sequence[str] | None, seeds: Sequence[int] | None) -> list[dict[str, Any]]:
     """Expand the config into the (model, seed) cells of the plan's run matrix."""
     seed_cfg = cfg["seeds"]
+    lang = str(cfg.get("language", "bn"))
     matrix: list[dict[str, Any]] = []
     for entry in cfg["models"]:
         key = str(entry["key"])
@@ -171,7 +179,7 @@ def build_run_matrix(cfg: Any, models: Sequence[str] | None, seeds: Sequence[int
                     "tier": tier,
                     "seed": seed,
                     "attn_implementation": entry.get("attn_implementation") or None,
-                    "run_name": run_name(key, seed),
+                    "run_name": run_name(key, seed, language=lang),
                 }
             )
     return matrix
@@ -361,7 +369,8 @@ def show_status(cfg: Any, matrix: list[dict[str, Any]]) -> None:
     sep = "+-" + "-+-".join("-" * w for w in col_widths) + "-+"
     hdr_line = "| " + " | ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers)) + " |"
 
-    print("\nPhase 4 Sweep Matrix Status:")
+    phase_num = cfg.get("phase", 4)
+    print(f"\nPhase {phase_num} Sweep Matrix Status:")
     print(sep)
     print(hdr_line)
     print(sep)
@@ -375,12 +384,21 @@ def show_status(cfg: Any, matrix: list[dict[str, Any]]) -> None:
 # Per-run execution
 # ---------------------------------------------------------------------------
 
-def run_one(cell: dict[str, Any], cfg: Any, dataset: dict[str, Any], *, force: bool) -> dict[str, Any]:
+def run_one(cell: dict[str, Any], cfg: Any, dataset: dict[str, Any], *, force: bool, cfg_path: Path | None = None) -> dict[str, Any]:
     """Train, extract logits for every eval set, validate, and write one run manifest."""
     from src.metrics.efficiency import Stopwatch
 
     if ft.is_interrupted():
         raise KeyboardInterrupt("Stopped by user before starting cell")
+
+    phase = int(cfg.get("phase", 4))
+    lang = str(cfg.get("language", "bn"))
+    phase_name = (
+        "english_control_fine_tuning"
+        if phase == 5 or lang == "en"
+        else "baseline_fine_tuning_all_models_bengali"
+    )
+    actual_cfg_path = cfg_path or CFG_PATH
 
     seed = int(cell["seed"])
     name = cell["run_name"]
@@ -405,8 +423,8 @@ def run_one(cell: dict[str, Any], cfg: Any, dataset: dict[str, Any], *, force: b
 
     manifest: dict[str, Any] = {
         "run_name": name,
-        "phase": 4,
-        "phase_name": "baseline_fine_tuning_all_models_bengali",
+        "phase": phase,
+        "phase_name": phase_name,
         "model_key": cell["model_key"],
         "canonical_hf_id": cell["hf_id"],
         "resolved_hf_id": cell["resolved_hf_id"],
@@ -415,9 +433,9 @@ def run_one(cell: dict[str, Any], cfg: Any, dataset: dict[str, Any], *, force: b
         "tier": cell["tier"],
         "seed": seed,
         "attn_implementation": cell.get("attn_implementation"),
-        "language": str(cfg["language"]),
+        "language": lang,
         "split": dataset["name"],
-        "config_path": _dev(CFG_PATH),
+        "config_path": _dev(actual_cfg_path),
         "config_hash": config_hash(cfg),
         "git_commit": get_git_commit(str(ROOT)),
     }
@@ -735,8 +753,8 @@ def run_one(cell: dict[str, Any], cfg: Any, dataset: dict[str, Any], *, force: b
     manifest["environment"] = collect_env_snapshot()
     write_run_json(
         run_json_path,
-        phase=4,
-        phase_name="baseline_fine_tuning_all_models_bengali",
+        phase=phase,
+        phase_name=phase_name,
         status=manifest["status"],
         payload={k: v for k, v in manifest.items() if k not in {"phase", "phase_name", "status"}},
         seed=seed,
@@ -775,6 +793,97 @@ def _seed_variance(records: list[dict[str, Any]], max_std: float) -> dict[str, A
             "passed": bool(std < max_std) if len(values) > 1 else None,
         }
     return out
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: English Control Checks (T5.3, T5.4)
+# ---------------------------------------------------------------------------
+
+def check_english_vs_bengali_f1(
+    en_records: list[dict[str, Any]],
+    bn_summary_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """T5.3: Verify English F1 > Bengali F1 (expected; documents English as higher-resource)."""
+    en_f1_by_model: dict[str, list[float]] = {}
+    for r in en_records:
+        if r.get("status") == "success":
+            f1 = (r.get("T4.2") or {}).get("macro_f1")
+            if f1 is not None:
+                en_f1_by_model.setdefault(r["model_key"], []).append(float(f1))
+
+    if not en_f1_by_model:
+        return {"passed": None, "reason": "No successful English runs"}
+
+    bn_f1_by_model: dict[str, list[float]] = {}
+    path = Path(bn_summary_path or (ROOT / "outputs" / "results" / "phase4_summary.json"))
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            for r in data.get("per_run", []):
+                if r.get("status") == "success" and r.get("macro_f1_id_test") is not None:
+                    bn_f1_by_model.setdefault(r["model_key"], []).append(float(r["macro_f1_id_test"]))
+        except Exception as e:
+            LOG.warning("Could not read Bengali baseline from %s: %s", path, e)
+
+    if not bn_f1_by_model:
+        return {
+            "passed": None,
+            "reason": "Bengali baseline results not yet available for comparison",
+            "en_means": {k: float(np.mean(v)) for k, v in en_f1_by_model.items()},
+        }
+
+    comparison: dict[str, Any] = {}
+    all_higher = True
+    for model_key, en_vals in en_f1_by_model.items():
+        en_mean = float(np.mean(en_vals))
+        bn_vals = bn_f1_by_model.get(model_key, [])
+        if bn_vals:
+            bn_mean = float(np.mean(bn_vals))
+            higher = en_mean > bn_mean
+            if not higher:
+                all_higher = False
+            comparison[model_key] = {
+                "en_mean_f1": en_mean,
+                "bn_mean_f1": bn_mean,
+                "en_greater_than_bn": higher,
+            }
+        else:
+            comparison[model_key] = {
+                "en_mean_f1": en_mean,
+                "bn_mean_f1": None,
+                "en_greater_than_bn": None,
+            }
+
+    has_valid_comparisons = any(c["en_greater_than_bn"] is not None for c in comparison.values())
+    return {
+        "passed": bool(all_higher and has_valid_comparisons),
+        "comparison": comparison,
+    }
+
+
+def check_english_shift_magnitude_documented(
+    shift_csv_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """T5.4: Shift magnitude documented: MMD computed for English source-to-target pairs."""
+    path = Path(shift_csv_path or (ROOT / "outputs" / "results" / "shift_magnitudes.csv"))
+    if not path.is_file():
+        return {"passed": False, "reason": f"File not found: {path}"}
+
+    df = pd.read_csv(path)
+    en_rows = df[
+        df["split"].str.startswith("english_")
+        | df["source_domain"].str.startswith("english_")
+        | df["split"].isin(["loco_asian", "loco_black", "loco_lgbtq"])
+    ]
+    if en_rows.empty:
+        return {"passed": False, "reason": "No English shift magnitude records found in CSV"}
+
+    has_valid_mmd = bool(en_rows["mmd"].notna().all() and (en_rows["mmd"] >= 0).all())
+    return {
+        "passed": has_valid_mmd,
+        "n_english_pairs": len(en_rows),
+        "pairs": en_rows[["split", "source_domain", "target_domain", "mmd"]].to_dict(orient="records"),
+    }
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:

@@ -12,6 +12,8 @@ from src.data.loader import (
     load_english_control,
     load_hatexplain,
     load_bengali_hs_30k,
+    load_dataset_stats,
+    verify_english_control_matching,
 )
 from src.data.dedup import dedup_pipeline, exact_dedup, near_dedup
 from src.data.splits import (
@@ -28,6 +30,8 @@ __all__ = [
     "load_english_control",
     "load_hatexplain",
     "load_bengali_hs_30k",
+    "load_dataset_stats",
+    "verify_english_control_matching",
     "dedup_pipeline",
     "exact_dedup",
     "near_dedup",
