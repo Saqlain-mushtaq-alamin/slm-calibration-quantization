@@ -115,3 +115,4 @@ Phase 5 evaluates the following gates:
 | **T5.2** | All English runs complete | Same pass criteria as Phase 4 (loss decreases, no NaN, checkpoints saved, macro-F1 > 0.55, covers both classes, valid probs) | Checked across all succeeded cells |
 | **T5.3** | English F1 > Bengali F1 | Expected; documents English as higher-resource language | `check_english_vs_bengali_f1()` compares against Bengali `phase4_summary.json` |
 | **T5.4** | Shift magnitude documented | MMD computed for English source-to-target pairs | `check_english_shift_magnitude_documented()` verifies English MMD in `outputs/results/shift_magnitudes.csv` |
+
