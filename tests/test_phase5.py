@@ -325,3 +325,4 @@ def test_cli_smoke_routing_isolates_phase5_smoke_dir(ph5):
     )
     res = ph5.run(args)
     assert res["status"] == "dry_run"
+
