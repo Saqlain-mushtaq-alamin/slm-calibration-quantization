@@ -527,9 +527,6 @@ def test_run_one_quant_e2e_fake_model(tmp_path, quant_config, monkeypatch):
     cfg_copy["sources"]["phase4"]["fp_logits_dir"] = str(tmp_path / "fp_logits")
 
     manifest = run_one_quant(cell, cfg_copy, caps={"id_val": 3, "id_test": 3, "ood_test": 2}, force=True)
-    if manifest["status"] != "success":
-        print("DEBUG MANIFEST ERROR:", manifest.get("error"))
-        print("DEBUG MANIFEST TRACEBACK:", manifest.get("traceback"))
 
     assert manifest["status"] == "success"
     assert manifest["quantize_s"] == 0.0
