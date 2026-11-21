@@ -25,8 +25,13 @@ from src.metrics.task_metrics import (
     bootstrap_accuracy_delta,
     compute_all_task_metrics,
 )
+from src.metrics.validation import (
+    REQUIRED_LOGIT_COLUMNS,
+    validate_logits_frame,
+)
 
 __all__ = [
+    "REQUIRED_LOGIT_COLUMNS",
     "agreement_rate",
     "aurc",
     "bootstrap_accuracy_delta",
@@ -46,4 +51,5 @@ __all__ = [
     "reliability_diagram",
     "risk_coverage_curve",
     "selective_accuracy_at_coverage",
+    "validate_logits_frame",
 ]
