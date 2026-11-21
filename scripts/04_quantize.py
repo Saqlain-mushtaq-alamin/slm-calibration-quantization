@@ -48,6 +48,7 @@ from src.data.assemble import SPLIT_PARTS, build_split_frames
 from src.data.splits import load_splits
 from src.metrics.aggregate import evaluate_logits_frame, metrics_frame
 from src.metrics.efficiency import Stopwatch
+from src.metrics.validation import validate_logits_frame
 from src.models import finetune as ft
 from src.models import logit_extraction as lx
 from src.models.quantize_track_a import (
@@ -69,6 +70,7 @@ from src.utils.atomic import (
     atomic_write_csv,
     atomic_write_json,
     atomic_write_parquet,
+    is_valid_merged,
     is_valid_parquet,
 )
 from src.utils.config import config_hash, load_config
