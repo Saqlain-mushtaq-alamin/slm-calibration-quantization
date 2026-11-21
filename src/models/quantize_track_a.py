@@ -217,12 +217,21 @@ def quantize_gptq(
 
     t1 = time.perf_counter()
     with torch.no_grad():
-        model.quantize(tokenizer, calib_texts, batch_size=batch_size, max_len=max_len)
+        try:
+            model.quantize(calib_texts, batch_size=batch_size, tokenizer=tokenizer)
+        except Exception:
+            try:
+                model.quantize(tokenizer, calib_texts, batch_size=batch_size, max_len=max_len)
+            except Exception:
+                model.quantize(calibration_dataset=calib_texts, batch_size=batch_size, tokenizer=tokenizer)
     quantize_s = time.perf_counter() - t1
 
     Path(output_path).mkdir(parents=True, exist_ok=True)
     t2 = time.perf_counter()
-    model.save(str(output_path), safe_serialization=True)
+    if hasattr(model, "save_quantized"):
+        model.save_quantized(str(output_path))
+    else:
+        model.save(str(output_path), safe_serialization=True)
     tokenizer.save_pretrained(str(output_path))
     save_s = time.perf_counter() - t2
 
@@ -283,9 +292,9 @@ def quantize_awq(
     try:
         from llmcompressor.transformers import oneshot  # noqa: F401
     except ImportError as exc:
-        raise RuntimeError(
+        raise AWQUnavailable(
             "AWQ requires llmcompressor, which is not installed in this environment. "
-            "Install it (Phase 6) or drop awq_int4 from the pilot method list."
+            "Install it or drop awq_int4 from the method list."
         ) from exc
     raise NotImplementedError("AWQ path lands in Phase 6; Phase 3 pilots GPTQ-4 only.")
 
