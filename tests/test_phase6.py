@@ -9,6 +9,7 @@ Validates:
 - CLI dry-run and smoke mode behaviors
 """
 
+import importlib
 from pathlib import Path
 import numpy as np
 import pytest
@@ -21,11 +22,12 @@ from src.models.quantize_track_a import (
     AWQUnavailable,
     GPTQUnavailable,
 )
-from scripts.04_quantize import (
-    load_quant_config,
-    build_experiment_matrix,
-    sample_calibration_tokens,
-)
+
+# Dynamically import scripts.04_quantize because of leading digit in module name
+_quant_module = importlib.import_module("scripts.04_quantize")
+load_quant_config = _quant_module.load_quant_config
+build_experiment_matrix = _quant_module.build_experiment_matrix
+sample_calibration_tokens = _quant_module.sample_calibration_tokens
 
 
 # ---------------------------------------------------------------------------
