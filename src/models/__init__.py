@@ -28,13 +28,17 @@ from src.models.logit_extraction import (
     validate_logits_frame,
 )
 from src.models.quantize_track_a import (
+    AWQUnavailable,
+    GPTQUnavailable,
     TRACK_A_METHODS,
     artifact_size_mb,
     build_calibration_texts,
     load_gptq,
     load_quantized_hf,
     quant_summary,
+    quantize_awq,
     quantize_gptq,
+    quantize_track_a,
 )
 
 __all__ = [
@@ -59,7 +63,9 @@ __all__ = [
     "load_quantized_hf",
     "probs_to_frame",
     "quant_summary",
+    "quantize_awq",
     "quantize_gptq",
+    "quantize_track_a",
     "save_logits",
     "subsample",
     "validate_logits_frame",
