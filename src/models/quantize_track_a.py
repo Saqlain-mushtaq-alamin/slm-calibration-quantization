@@ -102,15 +102,12 @@ class GPTQUnavailable(RuntimeError):
     """The installed gptqmodel build exposes no end-to-end quantization driver."""
 
 
-def gptq_backend_status() -> dict[str, Any]:
-    """Report which GPTQ driver APIs the installed ``gptqmodel`` build actually offers.
+class AWQUnavailable(RuntimeError):
+    """The AWQ quantization engine is not installed in this environment."""
 
-    gptqmodel restructured across 1.x -> 2.x. Older builds expose the driver as
-    ``GPTQModel.load(...).quantize(tokenizer, calib)`` then ``.save(dir)``; newer
-    builds ship only the per-layer :class:`gptqmodel.quantization.gptq.GPTQ`
-    accumulator (``add_batch`` / ``fasterquant``) and expect the caller to write
-    the layer-sequential loop, which we deliberately do not do.
-    """
+
+def gptq_backend_status() -> dict[str, Any]:
+    """Report which GPTQ driver APIs the installed ``gptqmodel`` build actually offers."""
     status: dict[str, Any] = {
         "installed": False,
         "version": None,
@@ -129,8 +126,18 @@ def gptq_backend_status() -> dict[str, Any]:
 
     status["installed"] = True
     status["version"] = getattr(gptqmodel, "__version__", "unknown")
-    status["has_model_quantize"] = callable(getattr(GPTQModel, "quantize", None))
-    status["has_model_save"] = callable(getattr(GPTQModel, "save", None))
+
+    # In gptqmodel 2.x, methods reside on BaseGPTQModel (instances returned by GPTQModel.load)
+    try:
+        from gptqmodel.models.base import BaseGPTQModel
+        has_quantize = callable(getattr(BaseGPTQModel, "quantize", None))
+        has_save = callable(getattr(BaseGPTQModel, "save", None)) or callable(getattr(BaseGPTQModel, "save_quantized", None))
+    except Exception:
+        has_quantize = callable(getattr(GPTQModel, "quantize", None))
+        has_save = callable(getattr(GPTQModel, "save", None))
+
+    status["has_model_quantize"] = has_quantize
+    status["has_model_save"] = has_save
     if status["has_model_quantize"] and status["has_model_save"]:
         status["driver_api"] = "GPTQModel.load/.quantize/.save"
         return status
@@ -144,10 +151,7 @@ def gptq_backend_status() -> dict[str, Any]:
 
     status["problems"].append(
         f"gptqmodel {status['version']} exposes no end-to-end driver "
-        f"(GPTQModel.quantize={status['has_model_quantize']}, "
-        f"GPTQModel.save={status['has_model_save']}); only the low-level per-layer "
-        f"{status['low_level_api']} API is present and no `gptqmodel` CLI is installed, "
-        "so GPTQ-4 cannot be produced without a hand-written sequential driver."
+        f"(quantize={status['has_model_quantize']}, save={status['has_model_save']})"
     )
     return status
 
