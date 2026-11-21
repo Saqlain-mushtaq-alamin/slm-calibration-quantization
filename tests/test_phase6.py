@@ -478,6 +478,7 @@ def test_run_one_quant_e2e_fake_model(tmp_path, quant_config, monkeypatch):
     class TinyModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
+            self.layer = torch.nn.Linear(4, 4)
             self.config = type("Config", (), {"vocab_size": 30, "use_cache": False})()
         def forward(self, input_ids, **kwargs):
             b, s = input_ids.shape
