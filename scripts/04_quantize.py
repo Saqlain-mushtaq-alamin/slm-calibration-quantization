@@ -432,6 +432,7 @@ def run_one_quant(
     frames = build_split_frames(df, spec, caps=eval_caps, seed=seed, parts=SPLIT_PARTS)
 
     # Resumability check (A7)
+    curr_cfg_hash = config_hash(cfg)
     if not force and run_json_path.is_file():
         try:
             prev = json.loads(run_json_path.read_text(encoding="utf-8"))
@@ -439,8 +440,9 @@ def run_one_quant(
                 is_valid_parquet(expected_logits[s], expected_rows=len(frames[s]))
                 for s in EVAL_SPLITS
             )
-            if prev.get("status") == "success" and parquets_valid:
-                LOG.info("SKIP %s (already completed with valid logits)", name)
+            hash_matches = prev.get("config_hash") == curr_cfg_hash
+            if prev.get("status") == "success" and parquets_valid and hash_matches:
+                LOG.info("SKIP %s (already completed with matching config and valid logits)", name)
                 prev["skipped"] = True
                 return prev
         except Exception as exc:
@@ -463,34 +465,50 @@ def run_one_quant(
                     "mode": "on_load",
                     "model_summary": quant_summary(model),
                 }
+                manifest["quantize_s"] = 0.0
             elif method == "gptq_int4":
                 status = gptq_backend_status()
                 if status["driver_api"] is None:
                     raise GPTQUnavailable("; ".join(status["problems"]))
 
-                calib_samples = int(cfg["track_a"]["calibration"]["n_samples"])
-                calib_max_len = int(cfg["track_a"]["calibration"]["max_len"])
-                calib_seed = int(cfg["track_a"]["calibration"]["seed"])
-                if eval_caps.get("train"):
-                    calib_samples = min(calib_samples, int(eval_caps["train"]))
-
-                calib_texts, calib_ids, prov = prepare_calibration_data(
-                    source_cfg, n_samples=calib_samples, max_len=calib_max_len, seed=calib_seed
-                )
-                manifest["calibration_provenance"] = prov
-
                 quant_out_dir = _resolve(cfg["paths"]["quantized_models"]) / name
-                LOG.info("Running GPTQ-4 quantization -> %s (n_calib=%d)", quant_out_dir, len(calib_texts))
-                gptq_res = quantize_gptq(
-                    cell["model_path"],
-                    calib_texts,
-                    str(quant_out_dir),
-                    bits=4,
-                    group_size=128,
-                    max_len=calib_max_len,
-                )
-                manifest["quant_info"] = gptq_res
-                manifest["artifact_dir"] = _dev(quant_out_dir)
+                if is_valid_gptq_dir(quant_out_dir):
+                    LOG.info(
+                        "Reusing existing complete GPTQ model directory at %s (skipping re-quantizing)",
+                        quant_out_dir,
+                    )
+                    manifest["quant_info"] = {
+                        "method": "gptq_int4",
+                        "reused_existing": True,
+                        "output_path": str(quant_out_dir),
+                        "quantize_s": 0.0,
+                    }
+                    manifest["artifact_dir"] = _dev(quant_out_dir)
+                    manifest["quantize_s"] = 0.0
+                else:
+                    calib_samples = int(cfg["track_a"]["calibration"]["n_samples"])
+                    calib_max_len = int(cfg["track_a"]["calibration"]["max_len"])
+                    calib_seed = int(cfg["track_a"]["calibration"]["seed"])
+                    if eval_caps.get("train"):
+                        calib_samples = min(calib_samples, int(eval_caps["train"]))
+
+                    calib_texts, calib_ids, prov = prepare_calibration_data(
+                        source_cfg, n_samples=calib_samples, max_len=calib_max_len, seed=calib_seed
+                    )
+                    manifest["calibration_provenance"] = prov
+
+                    LOG.info("Running GPTQ-4 quantization -> %s (n_calib=%d)", quant_out_dir, len(calib_texts))
+                    gptq_res = quantize_gptq(
+                        cell["model_path"],
+                        calib_texts,
+                        str(quant_out_dir),
+                        bits=4,
+                        group_size=128,
+                        max_len=calib_max_len,
+                    )
+                    manifest["quant_info"] = gptq_res
+                    manifest["artifact_dir"] = _dev(quant_out_dir)
+                    manifest["quantize_s"] = round(float(gptq_res.get("quantize_s", 0.0)), 2)
 
                 # Reload saved GPTQ model for evaluation
                 model, tokenizer = load_gptq(str(quant_out_dir))
@@ -508,6 +526,7 @@ def run_one_quant(
                 raise ValueError(f"Unknown Track A method {method!r}")
 
             # ---- STAGE 2: Logit Extraction --------------------------------
+            t_eval_start = time.perf_counter()
             for split in EVAL_SPLITS:
                 if is_interrupted():
                     raise KeyboardInterrupt(f"Interrupted during eval split {split}")
@@ -535,6 +554,7 @@ def run_one_quant(
                     split_name=str(source_cfg["split"]),
                     run_name=name,
                 )
+            manifest["eval_s"] = round(time.perf_counter() - t_eval_start, 2)
 
         manifest["wall_s"] = round(sw.wall_s, 2)
         manifest["peak_vram_gb"] = None if sw.peak_vram_gb is None else round(sw.peak_vram_gb, 3)
@@ -546,7 +566,7 @@ def run_one_quant(
 
         for split in EVAL_SPLITS:
             frame = pd.read_parquet(expected_logits[split])
-            validation[split] = lx.validate_logits_frame(
+            validation[split] = validate_logits_frame(
                 frame, min_macro_f1=min_f1, require_both_classes=False
             )
             split_metrics[split] = evaluate_logits_frame(
@@ -583,7 +603,11 @@ def run_one_quant(
                 manifest["T6.5_detail"] = t6_5_res
                 manifest["T6.5"] = {"passed": t6_5_res["passed"]}
                 if not t6_5_res["passed"]:
-                    LOG.error("CRITICAL: INT8 sanity check failed for %s: %s", name, t6_5_res["checks"])
+                    failing_checks = {k: v for k, v in t6_5_res["checks"].items() if v is False}
+                    print(f"FAILED T6.5 CHECKS for {name}: {failing_checks}")
+                    LOG.error("CRITICAL: T6.5 INT8 sanity gate failed for %s: %s", name, failing_checks)
+                    manifest["status"] = "failed"
+                    manifest["error"] = "T6.5 INT8 sanity gate failed"
             else:
                 LOG.warning("FP reference logits not found at %s; skipping T6.5 gate", fp_id_test_file)
                 manifest["T6.5"] = {"passed": None, "note": "fp_reference_missing"}
@@ -598,7 +622,8 @@ def run_one_quant(
         elif method == "awq_int4":
             manifest["T6.4"] = {"passed": True}
 
-        manifest["status"] = "success"
+        if manifest.get("status") != "failed":
+            manifest["status"] = "success"
 
     except (GPTQUnavailable, AWQUnavailable) as exc:
         manifest["status"] = "unavailable"
@@ -615,9 +640,15 @@ def run_one_quant(
         manifest["wall_s"] = round(time.perf_counter() - t_start, 2)
         LOG.error("FAILED %s: %s", name, exc)
     finally:
+        LOG.info("VRAM before release for %s: %s", name, _vram_report())
         if model is not None:
             free(model)
+        model = None
+        tokenizer = None
         gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        LOG.info("VRAM after release for %s: %s", name, _vram_report())
 
     manifest["environment"] = collect_env_snapshot()
     write_run_json(
