@@ -606,3 +606,215 @@ def test_cli_status():
     )
     assert result.returncode == 0, f"Status command failed: {result.stderr}"
     assert "Phase 6 Post-Training Quantization (Track A) Status" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Test: Real (non-mocked) quantize_gptq & load_gptq on tiny_smoke_gpt2
+# ---------------------------------------------------------------------------
+def test_real_quantize_and_load_gptq_tiny_model(tmp_path):
+    """Verify quantize_gptq and load_gptq work end-to-end on tiny Phase 0 model with finite logits."""
+    tiny_model_path = ROOT / "outputs" / "quantized" / "smoke_models" / "tiny_smoke_gpt2"
+    if not tiny_model_path.exists():
+        pytest.skip(f"Tiny smoke model not found at {tiny_model_path}")
+
+    out_dir = tmp_path / "tiny_gptq_out"
+    calib_texts = [
+        "The quick brown fox jumps over the lazy dog.",
+        "Bengali hate-speech classification requires careful calibration.",
+        "Quantization changes model confidence under domain shift.",
+        "Small language models still need trustworthy confidence.",
+    ]
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    res = quantize_gptq(
+        str(tiny_model_path),
+        calib_texts,
+        str(out_dir),
+        bits=4,
+        group_size=32,
+        device=device,
+    )
+    assert res["method"] == "gptq_int4"
+    assert out_dir.is_dir()
+    assert (out_dir / "quantize_config.json").is_file()
+
+    # Load model and verify extraction works and logits are finite
+    model, tokenizer = load_gptq(str(out_dir), device=device)
+    df = pd.DataFrame(
+        {
+            "example_id": ["ex1", "ex2"],
+            "text": ["Hello world", "Test sentence"],
+            "label": [0, 1],
+            "domain": ["test", "test"],
+        }
+    )
+    logits_df = lx.extract_logits_hf(
+        model,
+        tokenizer,
+        df,
+        split="test",
+        verbalizer={"hate": " A", "nonhate": " B"},
+    )
+    assert len(logits_df) == 2
+    assert np.all(np.isfinite(logits_df["logit_hate"].to_numpy()))
+    assert np.all(np.isfinite(logits_df["logit_nonhate"].to_numpy()))
+    assert np.all(np.isfinite(logits_df["prob_hate"].to_numpy()))
+    assert np.all(np.isfinite(logits_df["prob_nonhate"].to_numpy()))
+
+
+# ---------------------------------------------------------------------------
+# Test: Per-split Resume and Fast Ctrl+C Interruption
+# ---------------------------------------------------------------------------
+def test_per_split_resume_and_interruption(tmp_path, quant_config, monkeypatch, capsys):
+    """Test interrupting logit extraction leaves no partial parquet, and resume skips finished splits."""
+    cell = {
+        "artifact_name": "test_resume__bnb_int8",
+        "base_run_name": "fake_run_resume",
+        "source_key": "phase4",
+        "source_phase": 4,
+        "language": "bn",
+        "model_key": "fake_model",
+        "seed": 13,
+        "method": "bnb_int8",
+        "model_path": str(tmp_path),
+        "merged_dir": str(tmp_path),
+        "source_cfg": quant_config["sources"]["phase4"],
+    }
+
+    fake_df = pd.DataFrame(
+        {
+            "example_id": [f"id_{i}" for i in range(12)],
+            "text": ["টেস্ট বাক্য"] * 12,
+            "label": [i % 2 for i in range(12)],
+            "domain": ["slander"] * 12,
+        }
+    )
+    fake_spec = {
+        "train_ids": [f"id_{i}" for i in range(4)],
+        "id_val_ids": [f"id_{i}" for i in range(4, 7)],
+        "id_test_ids": [f"id_{i}" for i in range(7, 10)],
+        "ood_test_ids": [f"id_{i}" for i in range(10, 12)],
+    }
+    monkeypatch.setattr(_quant_module, "get_dataset_and_splits", lambda sc: (fake_df, fake_spec, "sha"))
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layer = torch.nn.Linear(4, 4)
+            self.config = type("Config", (), {"vocab_size": 30, "use_cache": False})()
+        def forward(self, input_ids, **kwargs):
+            b, s = input_ids.shape
+            logits = torch.zeros((b, s, 30), dtype=torch.float32)
+            logits[:, :, 7] = 2.0
+            logits[:, :, 9] = 1.0
+            return type("Out", (), {"logits": logits})()
+
+    class TinyTokenizer:
+        pad_token_id = 0
+        eos_token_id = 1
+        pad_token = "<pad>"
+        eos_token = "<eos>"
+        def __call__(self, texts, **kwargs):
+            n = len(texts) if isinstance(texts, list) else 1
+            return {
+                "input_ids": torch.ones((n, 4), dtype=torch.long),
+                "attention_mask": torch.ones((n, 4), dtype=torch.long),
+            }
+        def encode(self, text, **kwargs):
+            return [7 if "A" in text else 9]
+
+    monkeypatch.setattr(_quant_module, "load_quantized_hf", lambda p, m: TinyModel())
+    monkeypatch.setattr(_quant_module.ft, "load_tokenizer", lambda p: TinyTokenizer())
+
+    cfg_copy = dict(quant_config)
+    logits_dir = tmp_path / "logits"
+    cfg_copy["paths"] = {
+        "runs": str(tmp_path / "runs"),
+        "logits": str(logits_dir),
+        "quantized_models": str(tmp_path / "quant"),
+    }
+    fp_dir = tmp_path / "fp_logits" / "fake_run_resume"
+    fp_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "example_id": fake_spec["id_test_ids"],
+            "y_true": [0, 1, 0],
+            "prediction": [1, 1, 1],
+            "prob_hate": [0.73, 0.73, 0.73],
+            "prob_nonhate": [0.27, 0.27, 0.27],
+            "logit_hate": [2.0, 2.0, 2.0],
+            "logit_nonhate": [1.0, 1.0, 1.0],
+        }
+    ).to_parquet(fp_dir / "bf16__id_test.parquet")
+    cfg_copy["sources"]["phase4"]["fp_logits_dir"] = str(tmp_path / "fp_logits")
+
+    # Interrupt simulation on split id_test
+    orig_extract = lx.extract_logits_hf
+    extracted_splits = []
+
+    def mock_extract(model, tokenizer, dataset, **kwargs):
+        split = kwargs.get("split")
+        extracted_splits.append(split)
+        should_stop = kwargs.get("should_stop")
+        if split == "id_test":
+            # Simulate Ctrl+C triggering should_stop
+            if should_stop and should_stop():
+                raise KeyboardInterrupt("Interrupted during test split")
+        return orig_extract(model, tokenizer, dataset, **kwargs)
+
+    monkeypatch.setattr(_quant_module.lx, "extract_logits_hf", mock_extract)
+
+    # First run: set interrupt flag so it triggers during id_test
+    interrupted = [False]
+    def fake_is_interrupted():
+        # Trigger interrupt only when id_test begins
+        return interrupted[0]
+
+    monkeypatch.setattr(_quant_module, "is_interrupted", fake_is_interrupted)
+
+    # Make should_stop active when id_test is extracted
+    def trigger_interrupt(*args, **kwargs):
+        split = kwargs.get("split")
+        if split == "id_test":
+            interrupted[0] = True
+            raise KeyboardInterrupt("Simulated Ctrl+C on id_test")
+        extracted_splits.append(split)
+        return orig_extract(*args, **kwargs)
+
+    monkeypatch.setattr(_quant_module.lx, "extract_logits_hf", trigger_interrupt)
+
+    val_parquet = logits_dir / cell["artifact_name"] / "bnb_int8__id_val.parquet"
+    test_parquet = logits_dir / cell["artifact_name"] / "bnb_int8__id_test.parquet"
+    ood_parquet = logits_dir / cell["artifact_name"] / "bnb_int8__ood_test.parquet"
+
+    # Attempt run 1 - expected to raise KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt):
+        run_one_quant(cell, cfg_copy, caps={"id_val": 3, "id_test": 3, "ood_test": 2}, force=False)
+
+    # Verify id_val was saved, but id_test was never saved
+    assert val_parquet.is_file(), "id_val.parquet should have been saved before interrupt"
+    assert not test_parquet.exists(), "id_test.parquet must NOT exist after interrupt"
+    assert not ood_parquet.exists(), "ood_test.parquet must NOT exist after interrupt"
+
+    # Now Resume (run 2) with interrupt cleared
+    interrupted[0] = False
+    run2_splits = []
+    def resume_extract(*args, **kwargs):
+        run2_splits.append(kwargs.get("split"))
+        return orig_extract(*args, **kwargs)
+
+    monkeypatch.setattr(_quant_module.lx, "extract_logits_hf", resume_extract)
+
+    manifest = run_one_quant(cell, cfg_copy, caps={"id_val": 3, "id_test": 3, "ood_test": 2}, force=False)
+
+    # id_val should have been SKIPPED on resume!
+    assert "id_val" not in run2_splits, f"id_val should have been skipped, but was extracted: {run2_splits}"
+    assert "id_test" in run2_splits
+    assert "ood_test" in run2_splits
+
+    # All three parquets must now exist and manifest passed
+    assert val_parquet.is_file()
+    assert test_parquet.is_file()
+    assert ood_parquet.is_file()
+    assert manifest["status"] == "success"
+    assert manifest["T6.6"]["passed"] is True
+
