@@ -114,6 +114,30 @@ def _dev(rel: Path) -> str:
         return str(rel)
 
 
+def is_valid_gptq_dir(path: Path | str) -> bool:
+    """Check if a saved GPTQ model directory is complete and valid."""
+    p = Path(path)
+    if not p.is_dir():
+        return False
+    if not (p / "config.json").is_file():
+        return False
+    has_weights = (
+        any(p.glob("*.safetensors"))
+        or any(p.glob("*.bin"))
+        or (p / "quantize_config.json").is_file()
+    )
+    return has_weights
+
+
+def _vram_report() -> str:
+    """Format currently allocated and reserved GPU memory, or CPU indicator."""
+    if torch.cuda.is_available():
+        alloc = torch.cuda.memory_allocated() / (1024 ** 2)
+        res = torch.cuda.memory_reserved() / (1024 ** 2)
+        return f"allocated={alloc:.1f}MB, reserved={res:.1f}MB"
+    return "N/A (CPU)"
+
+
 # ---------------------------------------------------------------------------
 # Matrix Builder
 # ---------------------------------------------------------------------------
@@ -160,10 +184,9 @@ def build_quant_matrix(
                 continue
             run_name = run_dir.name
             merged_dir = run_dir / "merged"
-            adapter_dir = run_dir / "adapter"
 
-            # Must have merged model or adapter
-            if not (merged_dir.is_dir() or adapter_dir.is_dir()):
+            # Must have a valid merged directory (is_valid_merged); do not fall back to adapter dir
+            if not is_valid_merged(merged_dir):
                 continue
 
             parsed = parse_run_name(run_name)
@@ -187,9 +210,8 @@ def build_quant_matrix(
                         "model_key": model_key,
                         "seed": seed,
                         "method": method,
-                        "model_path": str(merged_dir if merged_dir.is_dir() else adapter_dir),
+                        "model_path": str(merged_dir),
                         "merged_dir": str(merged_dir),
-                        "adapter_dir": str(adapter_dir),
                         "source_cfg": source_cfg,
                     }
                 )
