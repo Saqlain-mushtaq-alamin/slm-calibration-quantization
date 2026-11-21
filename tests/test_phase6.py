@@ -262,7 +262,7 @@ def test_stage3_on_real_logits_parquet():
     metrics = evaluate_logits_frame(frame, ece_bins=15, ece_strategy="equal_width")
     assert "accuracy" in metrics
     assert "ece" in metrics
-    assert "brier_score" in metrics
+    assert "brier" in metrics
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +357,7 @@ def test_t6_5_failure_sets_failed_status(tmp_path, quant_config, monkeypatch, ca
     }
     cfg_copy["sources"]["phase4"]["fp_logits_dir"] = str(tmp_path / "fp_logits")
 
-    manifest = run_one_quant(cfg_copy, cell, force=True)
+    manifest = run_one_quant(cell, cfg_copy, force=True)
 
     # Assert status is failed with the exact error message
     assert manifest["status"] == "failed"
