@@ -105,14 +105,14 @@ def test_quant_config_matches_training_templates_and_verbalizer(quant_config):
     # Bengali prompt template
     assert (
         quant_config["sources"]["phase4"]["prompt_template"]
-        == cfg_bn["prompt_template"]
+        == cfg_bn["data"]["prompt_template"]
         == "{text}\nবাক্যটি ঘৃণামূলক কি না? উত্তর:"
     )
 
     # English prompt template
     assert (
         quant_config["sources"]["phase5"]["prompt_template"]
-        == cfg_en["prompt_template"]
+        == cfg_en["data"]["prompt_template"]
         == "Classify the following text as hate speech or not.\nText: {text}\nAnswer:"
     )
 
