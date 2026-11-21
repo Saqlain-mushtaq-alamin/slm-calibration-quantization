@@ -818,3 +818,41 @@ def test_per_split_resume_and_interruption(tmp_path, quant_config, monkeypatch, 
     assert manifest["status"] == "success"
     assert manifest["T6.6"]["passed"] is True
 
+
+def test_extract_logits_hf_should_stop():
+    """Verify extract_logits_hf halts immediately and raises KeyboardInterrupt when should_stop returns True."""
+    class DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layer = torch.nn.Linear(4, 4)
+            self.config = type("Config", (), {"vocab_size": 20, "use_cache": False})()
+        def forward(self, input_ids, **kwargs):
+            b, s = input_ids.shape
+            logits = torch.zeros((b, s, 20))
+            logits[:, :, 5] = 1.0
+            logits[:, :, 6] = 2.0
+            return type("Out", (), {"logits": logits})()
+
+    class DummyTok:
+        pad_token_id = 0
+        eos_token_id = 1
+        pad_token = "<pad>"
+        eos_token = "<eos>"
+        def __call__(self, texts, **kwargs):
+            n = len(texts) if isinstance(texts, list) else 1
+            return {"input_ids": torch.ones((n, 2), dtype=torch.long), "attention_mask": torch.ones((n, 2), dtype=torch.long)}
+        def encode(self, text, **kwargs):
+            return [5 if "A" in text else 6]
+
+    df = pd.DataFrame({"example_id": [f"id_{i}" for i in range(10)], "text": ["t"] * 10, "label": [0] * 10, "domain": ["d"] * 10})
+    calls = 0
+    def stop_fn():
+        nonlocal calls
+        calls += 1
+        return calls > 1
+
+    with pytest.raises(KeyboardInterrupt) as exc:
+        lx.extract_logits_hf(DummyModel(), DummyTok(), df, batch_size=2, should_stop=stop_fn)
+    assert "Interrupted during logit extraction" in str(exc.value)
+
+
