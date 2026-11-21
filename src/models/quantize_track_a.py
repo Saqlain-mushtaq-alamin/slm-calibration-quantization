@@ -220,10 +220,20 @@ def quantize_gptq(
     with torch.no_grad():
         try:
             model.quantize(calib_texts, batch_size=batch_size, tokenizer=tokenizer)
-        except Exception:
+        except Exception as exc1:
+            LOG.warning(
+                "GPTQModel.quantize(calib_texts, ...) failed: %s\n%s",
+                exc1,
+                traceback.format_exc(),
+            )
             try:
                 model.quantize(tokenizer, calib_texts, batch_size=batch_size, max_len=max_len)
-            except Exception:
+            except Exception as exc2:
+                LOG.warning(
+                    "GPTQModel.quantize(tokenizer, calib_texts, ...) failed: %s\n%s",
+                    exc2,
+                    traceback.format_exc(),
+                )
                 model.quantize(calibration_dataset=calib_texts, batch_size=batch_size, tokenizer=tokenizer)
     quantize_s = time.perf_counter() - t1
 
@@ -259,18 +269,31 @@ def quantize_gptq(
 
 
 def load_gptq(model_path: str, device: str = "cuda:0"):
-    """Reload a saved GPTQ checkpoint through the standard HF auto classes."""
+    """Reload a saved GPTQ checkpoint through HF auto classes or GPTQModel fallback."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map="auto", torch_dtype=torch.bfloat16
-    )
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path, device_map="auto", torch_dtype=torch.bfloat16
+        )
+    except Exception as exc:
+        LOG.warning(
+            "AutoModelForCausalLM failed to load GPTQ model at %s (%s); falling back to GPTQModel.load",
+            model_path,
+            exc,
+        )
+        from gptqmodel import GPTQModel
+
+        gptq_obj = GPTQModel.load(model_path, device=device)
+        model = getattr(gptq_obj, "model", gptq_obj)
+
     model.eval()
-    model.config.use_cache = False
+    if hasattr(model, "config"):
+        model.config.use_cache = False
     return model, tokenizer
 
 
