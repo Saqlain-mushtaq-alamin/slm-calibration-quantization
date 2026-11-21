@@ -9,11 +9,16 @@ Validates:
 - CLI dry-run and smoke mode behaviors
 """
 
-import importlib
+import importlib.util
+import sys
 from pathlib import Path
 import numpy as np
 import pytest
 import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.utils.sanity_checks import sanity_check_int8
 from src.models.quantize_track_a import (
@@ -23,8 +28,15 @@ from src.models.quantize_track_a import (
     GPTQUnavailable,
 )
 
-# Dynamically import scripts.04_quantize because of leading digit in module name
-_quant_module = importlib.import_module("scripts.04_quantize")
+def _load_quantize_script():
+    spec = importlib.util.spec_from_file_location("quantize_script", ROOT / "scripts" / "04_quantize.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["quantize_script"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+_quant_module = _load_quantize_script()
 load_quant_config = _quant_module.load_quant_config
 build_experiment_matrix = _quant_module.build_experiment_matrix
 sample_calibration_tokens = _quant_module.sample_calibration_tokens
