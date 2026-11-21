@@ -1,7 +1,64 @@
-# Placeholder — populated in Phase 6/7
-quantization:
-  track_a:
-    methods: [bnb_int8, bnb_nf4, gptq_int4, awq_int4]
-  track_b:
-    formats: [gguf]
-    quant_types: [Q4_K_M, Q5_K_M, Q8_0]
+# Phase 6: Post-Training Quantization — Track A (GPU / Hugging Face)
+phase: 6
+phase_name: "post_training_quantization_track_a_gpu_hf"
+
+track_a:
+  methods:
+    - bnb_int8
+    - bnb_nf4
+    - gptq_int4
+    - awq_int4
+
+  # Calibration settings for weight-only PTQ (GPTQ / AWQ)
+  # Rule: Calibration set = 512 samples from training split only (T6.8, T6.9)
+  calibration:
+    n_samples: 512
+    max_len: 256
+    seed: 42
+    batch_size: 1
+
+  # Sanity check tolerances for INT8 (T6.5 critical gate)
+  int8_tolerance:
+    max_f1_drop: 0.02
+    min_agreement: 0.95
+    max_mean_delta_p: 0.05
+
+  # Evaluation settings
+  eval:
+    batch_size: 8
+    ece_bins: 15
+    ece_strategy: equal_width
+    splits: [id_val, id_test, ood_test]
+
+# Source models to quantize (Phase 4 Bengali and Phase 5 English)
+sources:
+  phase4:
+    path: outputs/models/phase4
+    language: bn
+    dataset: bd_shs
+    split: loco_slander
+    data_path: data/processed/bd_shs_processed.csv
+    splits_path: data/splits/bd_shs_loco_splits.json
+    prompt_template: "{text}\nবাক্যটি ঘৃণামূলক কি না? উত্তর:"
+    fp_logits_dir: outputs/logits/phase4
+  phase5:
+    path: outputs/models/phase5
+    language: en
+    dataset: toxigen
+    split: loco_lgbtq
+    data_path: data/processed/english_control_matched.csv
+    splits_path: data/splits/english_control_loco_splits.json
+    prompt_template: "Classify the following text as hate speech or not.\nText: {text}\nAnswer:"
+    fp_logits_dir: outputs/logits/phase5
+
+verbalizer:
+  hate: " A"
+  nonhate: " B"
+
+paths:
+  quantized_models: outputs/quantized/track_a
+  logits: outputs/logits/phase6
+  runs: outputs/runs/phase6
+  results: outputs/results
+  summary: outputs/results/phase6_summary.json
+  metrics_csv: outputs/results/phase6_metrics.csv
