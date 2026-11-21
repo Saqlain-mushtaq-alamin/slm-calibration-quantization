@@ -232,8 +232,12 @@ def quantize_gptq(
         )
     load_s = time.perf_counter() - t0
 
-    LOG.info("model.quantize signature: %s", inspect.signature(model.quantize))
-    LOG.info("model.save signature: %s", inspect.signature(model.save))
+    if hasattr(model, "quantize"):
+        LOG.info("model.quantize signature: %s", inspect.signature(model.quantize))
+    if hasattr(model, "save"):
+        LOG.info("model.save signature: %s", inspect.signature(model.save))
+    elif hasattr(model, "save_quantized"):
+        LOG.info("model.save_quantized signature: %s", inspect.signature(model.save_quantized))
 
     t1 = time.perf_counter()
     with torch.no_grad():
