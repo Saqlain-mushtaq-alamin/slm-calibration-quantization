@@ -390,7 +390,8 @@ def test_quantize_gptq_logs_first_exception(monkeypatch, caplog):
         def save_quantized(self, path):
             pass
 
-    monkeypatch.setattr("src.models.quantize_track_a.gptq_backend_status", lambda: {"driver_api": "ok", "problems": []})
+    import src.models.quantize_track_a as qta_mod
+    monkeypatch.setattr(qta_mod, "gptq_backend_status", lambda: {"driver_api": "ok", "problems": []})
     monkeypatch.setattr("gptqmodel.GPTQModel.load", lambda *a, **k: FakeGPTQ())
     monkeypatch.setattr("transformers.AutoTokenizer.from_pretrained", lambda *a, **k: MagicMock())
 
@@ -524,7 +525,7 @@ def test_run_one_quant_e2e_fake_model(tmp_path, quant_config, monkeypatch):
     ).to_parquet(fp_dir / "bf16__id_test.parquet")
     cfg_copy["sources"]["phase4"]["fp_logits_dir"] = str(tmp_path / "fp_logits")
 
-    manifest = run_one_quant(cfg_copy, cell, caps={"id_val": 3, "id_test": 3, "ood_test": 2}, force=True)
+    manifest = run_one_quant(cell, cfg_copy, caps={"id_val": 3, "id_test": 3, "ood_test": 2}, force=True)
 
     assert manifest["status"] == "success"
     assert manifest["quantize_s"] == 0.0
