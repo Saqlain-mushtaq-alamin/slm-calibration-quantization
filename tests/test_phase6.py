@@ -127,9 +127,9 @@ def test_build_experiment_matrix(quant_config):
             "awq_int4",
         }
         assert isinstance(item["seed"], int)
-        assert Path(item["run_dir"]).exists()
-        assert "target_model_dir" in item
+        assert Path(item["model_path"]).exists()
         assert "merged_dir" in item
+        assert "adapter_dir" in item
 
     # Verify method counts match methods x models
     methods = set(quant_config["track_a"]["methods"])
