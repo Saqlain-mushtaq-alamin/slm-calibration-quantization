@@ -531,6 +531,12 @@ def run_one_quant(
                 if is_interrupted():
                     raise KeyboardInterrupt(f"Interrupted during eval split {split}")
 
+                target_parquet = expected_logits[split]
+                expected_rows = len(frames[split])
+                if not force and is_valid_parquet(target_parquet, expected_rows=expected_rows):
+                    LOG.info("Skip split %s for %s (valid parquet exists: %d rows)", split, name, expected_rows)
+                    continue
+
                 frame = lx.extract_logits_hf(
                     model,
                     tokenizer,
@@ -541,10 +547,11 @@ def run_one_quant(
                     max_len=int(cfg["track_a"]["calibration"]["max_len"]),
                     template=str(source_cfg["prompt_template"]),
                     model_id=f"{base_run}|{method}",
+                    should_stop=is_interrupted,
                 )
                 lx.save_logits(
                     frame,
-                    expected_logits[split],
+                    target_parquet,
                     model=cell["model_key"],
                     canonical_model=cell["model_key"],
                     model_key=cell["model_key"],
@@ -729,7 +736,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         LOG.warning("Quantization execution stopped by user; state preserved for resume.")
 
     if stopped_early:
-        print("\n[STOPPED] Execution stopped; re-run the same command to resume.\n")
+        print("\n[STOPPED] re-run the same command to resume\n")
         return {"status": "stopped", "n_processed": len(records)}
 
     succeeded = [r for r in records if r.get("status") == "success"]
@@ -848,8 +855,12 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="print planned artifacts and exit")
     args = parser.parse_args()
 
-    result = run(args)
-    return 0 if result.get("status") in {"passed", "passed_with_failures", "dry_run", "status_displayed"} else 1
+    try:
+        result = run(args)
+        return 0 if result.get("status") in {"passed", "passed_with_failures", "dry_run", "status_displayed", "stopped"} else 1
+    except KeyboardInterrupt:
+        print("\n[STOPPED] re-run the same command to resume\n")
+        return 0
 
 
 if __name__ == "__main__":

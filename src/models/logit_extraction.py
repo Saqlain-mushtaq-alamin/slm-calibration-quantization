@@ -229,6 +229,7 @@ def extract_logits_hf(
     model_id: str = "",
     device: str | torch.device | None = None,
     progress_every: int = 20,
+    should_stop: Callable[[], bool] | None = None,
 ) -> pd.DataFrame:
     """Extract two-way label logits for every row of ``dataset``.
 
@@ -260,6 +261,8 @@ def extract_logits_hf(
     t0 = time.perf_counter()
     n_batches = math_ceil(len(prompts), batch_size)
     for i, start in enumerate(range(0, len(prompts), batch_size)):
+        if should_stop is not None and should_stop():
+            raise KeyboardInterrupt(f"Interrupted during logit extraction on batch {i + 1}/{n_batches}")
         chunk = prompts[start : start + batch_size]
         lh, ln = answer_logits_batched(
             model, tokenizer, chunk, hate_token_id, nonhate_token_id, max_len=max_len

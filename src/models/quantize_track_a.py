@@ -212,9 +212,28 @@ def quantize_gptq(
         quant_kwargs["dynamic"] = dynamic_enum
     quant_config = QuantizeConfig(**quant_kwargs)
 
+    import inspect
+    LOG.info("GPTQModel.load signature: %s", inspect.signature(GPTQModel.load))
+
     t0 = time.perf_counter()
-    model = GPTQModel.load(model_path, device=device, trust_remote_code=trust_remote_code)
+    try:
+        model = GPTQModel.load(
+            model_path,
+            quantize_config=quant_config,
+            device=device,
+            trust_remote_code=trust_remote_code,
+        )
+    except TypeError as te:
+        LOG.warning("GPTQModel.load rejected device argument (%s); retrying without device", te)
+        model = GPTQModel.load(
+            model_path,
+            quantize_config=quant_config,
+            trust_remote_code=trust_remote_code,
+        )
     load_s = time.perf_counter() - t0
+
+    LOG.info("model.quantize signature: %s", inspect.signature(model.quantize))
+    LOG.info("model.save signature: %s", inspect.signature(model.save))
 
     t1 = time.perf_counter()
     with torch.no_grad():
@@ -239,10 +258,12 @@ def quantize_gptq(
 
     Path(output_path).mkdir(parents=True, exist_ok=True)
     t2 = time.perf_counter()
-    if hasattr(model, "save_quantized"):
+    if hasattr(model, "save"):
+        model.save(str(output_path))
+    elif hasattr(model, "save_quantized"):
         model.save_quantized(str(output_path))
     else:
-        model.save(str(output_path), safe_serialization=True)
+        model.save_pretrained(str(output_path))
     tokenizer.save_pretrained(str(output_path))
     save_s = time.perf_counter() - t2
 
@@ -288,7 +309,10 @@ def load_gptq(model_path: str, device: str = "cuda:0"):
         )
         from gptqmodel import GPTQModel
 
-        gptq_obj = GPTQModel.load(model_path, device=device)
+        try:
+            gptq_obj = GPTQModel.load(model_path, device=device)
+        except TypeError:
+            gptq_obj = GPTQModel.load(model_path)
         model = getattr(gptq_obj, "model", gptq_obj)
 
     model.eval()
