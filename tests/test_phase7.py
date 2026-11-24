@@ -421,3 +421,48 @@ def test_run_one_quant_b_lifecycle(tmp_path, track_b_config):
         assert run_data["status"] == "success"
         assert run_data["phase"] == 7
         assert run_data["track"] == "B"
+
+
+def test_extract_logits_llamacpp_bos_preservation_and_cancellation():
+    """Verify BOS token is preserved during truncation and cancellation raises KeyboardInterrupt."""
+    from src.models.quantize_track_b import extract_logits_llamacpp
+
+    mock_llm = MagicMock()
+    mock_llm.token_bos.return_value = 1
+    # 300 tokens starting with BOS
+    mock_llm.tokenize.return_value = [1] + list(range(2, 301))
+    mock_llm.n_tokens = 256
+    mock_llm.context_params.logits_all = True
+    mock_llm.scores = np.zeros((256, 1000))
+
+    eval_df = pd.DataFrame({
+        "example_id": ["ex1"],
+        "text": ["some long prompt"],
+        "label": [1],
+    })
+
+    # Test BOS preservation: tokens evaluated should start with 1 (bos_id) and have len 256
+    extract_logits_llamacpp(
+        mock_llm,
+        eval_df,
+        verbalizer={"hate": " A", "nonhate": " B"},
+        hate_token_id=10,
+        nonhate_token_id=20,
+        max_len=256,
+    )
+    # Check what tokens were passed to llm.eval()
+    call_tokens = mock_llm.eval.call_args[0][0]
+    assert len(call_tokens) == 256
+    assert call_tokens[0] == 1  # BOS preserved!
+    assert call_tokens[-1] == 300  # trailing verbalizer token preserved!
+
+    # Test cancellation raises KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt, match="Logit extraction interrupted"):
+        extract_logits_llamacpp(
+            mock_llm,
+            eval_df,
+            verbalizer={"hate": " A", "nonhate": " B"},
+            hate_token_id=10,
+            nonhate_token_id=20,
+            should_stop=lambda: True,
+        )
