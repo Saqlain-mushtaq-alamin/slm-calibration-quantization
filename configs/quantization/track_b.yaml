@@ -1,0 +1,66 @@
+# Phase 7: Post-Training Quantization — Track B (GGUF / llama.cpp)
+phase: 7
+phase_name: "post_training_quantization_track_b_gguf_llama_cpp"
+
+track_b:
+  methods:
+    - f16
+    - q8_0
+    - q4_k_m
+    - q3_k_m
+    # Optional method:
+    # - q2_k
+
+  # llama.cpp conversion & runtime execution settings
+  runtime:
+    n_ctx: 512
+    n_gpu_layers: -1 # -1 offloads all layers to GPU; 0 forces CPU execution
+    n_threads: null  # null defaults to half available physical CPU cores
+    verbose: false
+
+  # Critical Gate T7.5: Tolerances for GGUF F16 baseline vs HF BF16 reference
+  f16_tolerance:
+    min_agreement: 0.90
+    max_f1_drop: 0.05
+    max_mean_delta_p: 0.10
+
+  # Evaluation settings
+  eval:
+    batch_size: 16
+    ece_bins: 15
+    ece_strategy: equal_width
+    splits: [id_val, id_test, ood_test]
+
+# Source models to quantize (Phase 4 Bengali and Phase 5 English)
+sources:
+  phase4:
+    path: outputs/models/phase4
+    language: bn
+    dataset: bd_shs
+    split: loco_slander
+    data_path: data/processed/bd_shs_processed.csv
+    splits_path: data/splits/bd_shs_loco_splits.json
+    prompt_template: "{text}\nবাক্যটি ঘৃণামূলক কি না? উত্তর:"
+    fp_logits_dir: outputs/logits/phase4
+  phase5:
+    path: outputs/models/phase5
+    language: en
+    dataset: toxigen
+    split: loco_lgbtq
+    data_path: data/processed/english_control_matched.csv
+    splits_path: data/splits/english_control_loco_splits.json
+    prompt_template: "Classify the following text as hate speech or not.\nText: {text}\nAnswer:"
+    fp_logits_dir: outputs/logits/phase5
+
+verbalizer:
+  hate: " A"
+  nonhate: " B"
+
+paths:
+  quantized_models: outputs/quantized/track_b
+  logits: outputs/logits/phase7
+  runs: outputs/runs/phase7
+  results: outputs/results
+  summary: outputs/results/phase7_summary.json
+  metrics_csv: outputs/results/phase7_metrics.csv
+  convert_script: outputs/quantized/llama.cpp/convert_hf_to_gguf.py
