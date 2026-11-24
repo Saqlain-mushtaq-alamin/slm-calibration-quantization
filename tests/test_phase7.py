@@ -267,8 +267,41 @@ def test_sanity_check_gguf_f16_id_mismatch():
     """Verify error raised on mismatched example_ids."""
     df1 = pd.DataFrame({"example_id": ["a", "b"], "y_true": [0, 1], "prediction": [0, 1], "prob_hate": [0.1, 0.9]})
     df2 = pd.DataFrame({"example_id": ["c", "d"], "y_true": [0, 1], "prediction": [0, 1], "prob_hate": [0.1, 0.9]})
-    with pytest.raises(ValueError, match="No overlapping"):
+    with pytest.raises(ValueError, match="mismatched IDs"):
         sanity_check_gguf_f16(df1, df2)
+
+
+def test_skip_quantizing_when_f16_fails_t7_5(tmp_path, track_b_config):
+    """Verify quantize skips subsequent methods if base F16 failed critical gate T7.5."""
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    f16_manifest = runs_dir / "mock_bn_qwen_s42__f16.json"
+    f16_manifest.write_text(json.dumps({
+        "status": "failed",
+        "T7.5": {"passed": False},
+        "config_hash": "dummy",
+    }), encoding="utf-8")
+
+    test_cfg = dict(track_b_config)
+    test_cfg["paths"] = dict(track_b_config["paths"])
+    test_cfg["paths"]["runs"] = str(runs_dir)
+
+    cell = {
+        "artifact_name": "mock_bn_qwen_s42__q8_0",
+        "base_run_name": "mock_bn_qwen_s42",
+        "source_key": "phase4",
+        "source_phase": 4,
+        "language": "bn",
+        "model_key": "qwen2_5_0_5b_instruct",
+        "seed": 42,
+        "method": "q8_0",
+        "merged_dir": str(tmp_path / "mock_merged"),
+        "source_cfg": track_b_config["sources"]["phase4"],
+    }
+
+    res = run_one_quant_b(cell, test_cfg)
+    assert res["status"] == "skipped_f16_gate_failed"
+    assert "T7.5" in res["error"]
 
 
 # ---------------------------------------------------------------------------
