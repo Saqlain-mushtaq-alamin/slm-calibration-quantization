@@ -66,6 +66,17 @@ class GGUFQuantizeUnavailable(RuntimeError):
     """Neither llama-quantize binary nor llama_cpp.llama_model_quantize is available."""
 
 
+def check_llama_gpu_support() -> bool:
+    """Check if the installed llama_cpp build supports CUDA / GPU offload."""
+    try:
+        import llama_cpp
+        if hasattr(llama_cpp, "llama_supports_gpu_offload"):
+            return bool(llama_cpp.llama_supports_gpu_offload())
+    except Exception:
+        pass
+    return False
+
+
 def is_valid_gguf_file(path: str | Path, min_size_bytes: int = 1024 * 1024) -> bool:
     """Verify that a GGUF file exists, has a valid header ('GGUF'), and non-trivial size."""
     p = Path(path)
@@ -202,6 +213,8 @@ def convert_to_gguf(
 ) -> dict[str, Any]:
     """Convert Hugging Face merged checkpoint to GGUF format using convert_hf_to_gguf.py.
 
+    Writes to a temporary .part file and atomically renames on success.
+
     Args:
         model_path: Path to directory containing HF merged checkpoint.
         output_path: Target .gguf file path.
@@ -216,6 +229,10 @@ def convert_to_gguf(
     out_p = Path(output_path).resolve()
     out_p.parent.mkdir(parents=True, exist_ok=True)
 
+    tmp_p = out_p.with_name(out_p.name + ".part")
+    if tmp_p.exists():
+        tmp_p.unlink()
+
     script_path = find_convert_script(convert_script)
     python_exe = sys.executable
 
@@ -224,7 +241,7 @@ def convert_to_gguf(
         str(script_path),
         str(model_p),
         "--outfile",
-        str(out_p),
+        str(tmp_p),
         "--outtype",
         outtype,
     ]
@@ -234,17 +251,26 @@ def convert_to_gguf(
     LOG.info("Converting HF model %s -> GGUF %s (%s)", model_p.name, out_p.name, outtype)
     t0 = time.perf_counter()
 
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    duration = time.perf_counter() - t0
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        duration = time.perf_counter() - t0
 
-    if res.returncode != 0:
-        LOG.error("GGUF conversion failed (code %d):\nSTDOUT:\n%s\nSTDERR:\n%s", res.returncode, res.stdout, res.stderr)
-        raise RuntimeError(
-            f"convert_hf_to_gguf.py failed with return code {res.returncode}:\n{res.stderr or res.stdout}"
-        )
+        if res.returncode != 0:
+            LOG.error("GGUF conversion failed (code %d):\nSTDOUT:\n%s\nSTDERR:\n%s", res.returncode, res.stdout, res.stderr)
+            raise RuntimeError(
+                f"convert_hf_to_gguf.py failed with return code {res.returncode}:\n{res.stderr or res.stdout}"
+            )
 
-    if not is_valid_gguf_file(out_p):
-        raise RuntimeError(f"GGUF conversion completed but {out_p} is not a valid GGUF file")
+        if not is_valid_gguf_file(tmp_p):
+            raise RuntimeError(f"GGUF conversion completed but temporary file {tmp_p} is not a valid GGUF file")
+
+        os.replace(tmp_p, out_p)
+    finally:
+        if tmp_p.exists():
+            try:
+                tmp_p.unlink()
+            except Exception:
+                pass
 
     size_mb = gguf_file_size_mb(out_p)
     LOG.info("Converted %s successfully: %.2f MB in %.2fs", out_p.name, size_mb, duration)
@@ -267,7 +293,8 @@ def quantize_gguf(
     """Quantize GGUF model to specified type (Q8_0, Q4_K_M, Q3_K_M, Q2_K).
 
     Uses standalone llama-quantize binary if available, or falls back to
-    llama_cpp.llama_model_quantize C-API.
+    llama_cpp.llama_model_quantize C-API. Writes to a temporary .part file
+    and atomically renames on success.
 
     Args:
         input_gguf: Path to source F16 GGUF model.
@@ -286,47 +313,61 @@ def quantize_gguf(
     if not is_valid_gguf_file(inp_p):
         raise FileNotFoundError(f"Source GGUF file {inp_p} not found or invalid")
 
+    tmp_p = out_p.with_name(out_p.name + ".part")
+    if tmp_p.exists():
+        tmp_p.unlink()
+
     norm_type = quant_type.lower().strip()
     quant_type_str = LLAMA_QUANT_TYPE_NAMES.get(norm_type, norm_type).upper()
 
     t0 = time.perf_counter()
     bin_path = find_llama_quantize_binary(quantize_bin)
 
-    if bin_path is not None:
-        LOG.info("Quantizing via binary %s: %s -> %s (%s)", bin_path.name, inp_p.name, out_p.name, quant_type_str)
-        cmd = [str(bin_path), str(inp_p), str(out_p), quant_type_str]
-        if n_threads:
-            cmd.extend(["--nthread", str(n_threads)])
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode != 0:
-            LOG.error("llama-quantize binary failed (code %d):\n%s", res.returncode, res.stderr or res.stdout)
-            raise RuntimeError(f"llama-quantize failed: {res.stderr or res.stdout}")
-        backend_used = f"binary ({bin_path.name})"
-    else:
-        # Use llama_cpp Python C-API directly
-        try:
-            import llama_cpp
-        except ImportError as exc:
-            raise GGUFQuantizeUnavailable("llama_cpp module is required for in-process GGUF quantization") from exc
+    try:
+        if bin_path is not None:
+            LOG.info("Quantizing via binary %s: %s -> %s (%s)", bin_path.name, inp_p.name, out_p.name, quant_type_str)
+            # llama-quantize positional syntax: llama-quantize [flags] input output quant_type [nthreads]
+            cmd = [str(bin_path), str(inp_p), str(tmp_p), quant_type_str]
+            if n_threads:
+                cmd.append(str(int(n_threads)))
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                LOG.error("llama-quantize binary failed (code %d):\n%s", res.returncode, res.stderr or res.stdout)
+                raise RuntimeError(f"llama-quantize failed: {res.stderr or res.stdout}")
+            backend_used = f"binary ({bin_path.name})"
+        else:
+            # Use llama_cpp Python C-API directly
+            try:
+                import llama_cpp
+            except ImportError as exc:
+                raise GGUFQuantizeUnavailable("llama_cpp module is required for in-process GGUF quantization") from exc
 
-        LOG.info("Quantizing via llama_cpp C-API: %s -> %s (%s)", inp_p.name, out_p.name, quant_type_str)
-        ftype_val = get_llama_ftype_enum(norm_type)
-        params = llama_cpp.llama_model_quantize_default_params()
-        params.ftype = ftype_val
-        if n_threads:
-            params.nthread = int(n_threads)
+            LOG.info("Quantizing via llama_cpp C-API: %s -> %s (%s)", inp_p.name, out_p.name, quant_type_str)
+            ftype_val = get_llama_ftype_enum(norm_type)
+            params = llama_cpp.llama_model_quantize_default_params()
+            params.ftype = ftype_val
+            if n_threads:
+                params.nthread = int(n_threads)
 
-        inp_bytes = str(inp_p).encode("utf-8")
-        out_bytes = str(out_p).encode("utf-8")
+            inp_bytes = str(inp_p).encode("utf-8")
+            tmp_bytes = str(tmp_p).encode("utf-8")
 
-        ret = llama_cpp.llama_model_quantize(inp_bytes, out_bytes, ctypes.byref(params))
-        if ret != 0:
-            raise RuntimeError(f"llama_model_quantize returned non-zero code {ret} for {out_p}")
-        backend_used = "llama_cpp C-API"
+            ret = llama_cpp.llama_model_quantize(inp_bytes, tmp_bytes, ctypes.byref(params))
+            if ret != 0:
+                raise RuntimeError(f"llama_model_quantize returned non-zero code {ret} for {out_p}")
+            backend_used = "llama_cpp C-API"
 
-    duration = time.perf_counter() - t0
-    if not is_valid_gguf_file(out_p):
-        raise RuntimeError(f"Quantization finished but {out_p} is missing or invalid")
+        duration = time.perf_counter() - t0
+        if not is_valid_gguf_file(tmp_p):
+            raise RuntimeError(f"Quantization finished but temporary file {tmp_p} is missing or invalid")
+
+        os.replace(tmp_p, out_p)
+    finally:
+        if tmp_p.exists():
+            try:
+                tmp_p.unlink()
+            except Exception:
+                pass
 
     inp_size_mb = gguf_file_size_mb(inp_p)
     out_size_mb = gguf_file_size_mb(out_p)
