@@ -635,7 +635,13 @@ def sanity_check_gguf_f16(
 
     fp_ids = set(fp_df["example_id"])
     gguf_ids = set(gguf_df["example_id"])
-    if fp_ids != gguf_ids:
+    if not gguf_ids.issubset(fp_ids):
+        diff = gguf_ids - fp_ids
+        raise ValueError(
+            f"GGUF contains IDs not present in reference FP: {len(diff)} mismatched IDs (e.g. {list(diff)[:5]})"
+        )
+    # Outside smoke mode (when gguf has > 64 samples), verify exact set equality
+    if len(gguf_ids) > 64 and fp_ids != gguf_ids:
         diff = fp_ids.symmetric_difference(gguf_ids)
         raise ValueError(
             f"example_id sets are not identical: {len(diff)} mismatched IDs (e.g. {list(diff)[:5]})"
