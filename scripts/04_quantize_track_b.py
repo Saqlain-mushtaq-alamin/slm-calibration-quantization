@@ -704,22 +704,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     results: list[dict[str, Any]] = []
     t_start_all = time.perf_counter()
+    interrupted = False
 
-    for idx, cell in enumerate(matrix, 1):
-        if is_interrupted():
-            LOG.warning("Execution interrupted before artifact %d (%s)", idx, cell["artifact_name"])
-            break
+    try:
+        for idx, cell in enumerate(matrix, 1):
+            if is_interrupted():
+                LOG.warning("Execution interrupted before artifact %d (%s)", idx, cell["artifact_name"])
+                interrupted = True
+                break
 
-        LOG.info("\n[%d / %d] Processing Track B artifact: %s", idx, len(matrix), cell["artifact_name"])
-        res = run_one_quant_b(
-            cell,
-            cfg,
-            force=args.force,
-            caps=eval_caps,
-            n_gpu_layers=args.n_gpu_layers,
-            n_threads=args.n_threads,
-        )
-        results.append(res)
+            LOG.info("\n[%d / %d] Processing Track B artifact: %s", idx, len(matrix), cell["artifact_name"])
+            res = run_one_quant_b(
+                cell,
+                cfg,
+                force=args.force,
+                caps=eval_caps,
+                n_gpu_layers=args.n_gpu_layers,
+                n_threads=args.n_threads,
+            )
+            results.append(res)
+    except KeyboardInterrupt:
+        LOG.warning("\n[STOPPED] Track B sweep interrupted. Re-run the same command to resume.\n")
+        interrupted = True
 
     wall_total = round(time.perf_counter() - t_start_all, 2)
 
@@ -749,6 +755,36 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         pd.DataFrame(metrics_records).to_csv(csv_path, index=False)
         LOG.info("Wrote Phase 7 metrics to %s (%d rows)", csv_path, len(metrics_records))
 
+    # Build comprehensive T7.1 - T7.7 tests verdict
+    f16_results = [r for r in results if r.get("method") == "f16"]
+    q8_results = [r for r in results if r.get("method") == "q8_0"]
+    q4_results = [r for r in results if r.get("method") == "q4_k_m"]
+    q3_results = [r for r in results if r.get("method") == "q3_k_m"]
+    success_results = [r for r in results if r.get("status") == "success"]
+
+    tests_verdict: dict[str, Any] = {
+        "T7.1": all((r.get("T7.1") or {}).get("passed", False) for r in f16_results) if f16_results else None,
+        "T7.2": all((r.get("T7.2") or {}).get("passed", False) for r in q8_results) if q8_results else None,
+        "T7.3": all((r.get("T7.3") or {}).get("passed", False) for r in q4_results) if q4_results else None,
+        "T7.4": all((r.get("T7.4") or {}).get("passed", False) for r in q3_results) if q3_results else None,
+        "T7.5": all((r.get("T7.5") or {}).get("passed") is True for r in f16_results if (r.get("T7.5") or {}).get("passed") is not None) if f16_results else None,
+        "T7.6": all((r.get("T7.6") or {}).get("passed", False) for r in success_results) if success_results else None,
+        "T7.7": all((r.get("T7.7") or {}).get("passed", False) for r in success_results) if success_results else None,
+    }
+
+    failed_count = sum(1 for r in results if r.get("status") == "failed")
+    success_count = sum(1 for r in results if r.get("status") == "success")
+    skipped_count = sum(1 for r in results if str(r.get("status", "")).startswith("skipped"))
+
+    if interrupted:
+        overall_status = "stopped"
+    elif failed_count > 0:
+        overall_status = "failed"
+    elif success_count > 0 and all(v is not False for v in tests_verdict.values() if v is not None):
+        overall_status = "passed"
+    else:
+        overall_status = "pending"
+
     # Compile comprehensive summary JSON
     summary_path = _resolve(cfg["paths"]["summary"])
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -757,15 +793,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "phase_name": "post_training_quantization_track_b_gguf_llama_cpp",
         "track": "B",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "status": overall_status,
         "total_artifacts": len(matrix),
         "executed_count": len(results),
-        "success_count": sum(1 for r in results if r.get("status") == "success"),
-        "failed_count": sum(1 for r in results if r.get("status") == "failed"),
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "skipped_count": skipped_count,
         "total_wall_s": wall_total,
+        "tests": tests_verdict,
         "results": results,
     }
     atomic_write_json(summary_path, summary_data)
-    LOG.info("Wrote Phase 7 summary manifest to %s", summary_path)
+    LOG.info("Wrote Phase 7 summary manifest to %s (status: %s)", summary_path, overall_status)
 
     return summary_data
 
