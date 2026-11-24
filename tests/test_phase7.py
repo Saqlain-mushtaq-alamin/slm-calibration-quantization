@@ -364,10 +364,10 @@ def test_run_one_quant_b_lifecycle(tmp_path, track_b_config):
             "entropy": [0.08] * n,
         })
 
-    with patch("scripts.04_quantize_track_b.convert_to_gguf") as mock_conv, \
-         patch("scripts.04_quantize_track_b.quantize_gguf") as mock_quant, \
-         patch("scripts.04_quantize_track_b.load_gguf_model") as mock_load, \
-         patch("scripts.04_quantize_track_b.extract_logits_llamacpp", side_effect=mock_extract):
+    with patch.object(_track_b_mod, "convert_to_gguf") as mock_conv, \
+         patch.object(_track_b_mod, "quantize_gguf") as mock_quant, \
+         patch.object(_track_b_mod, "load_gguf_model") as mock_load, \
+         patch.object(_track_b_mod, "extract_logits_llamacpp", side_effect=mock_extract):
 
         mock_conv.return_value = {"status": "success", "file_size_mb": 2.0}
         mock_quant.return_value = {"status": "success", "output_size_mb": 1.0}
