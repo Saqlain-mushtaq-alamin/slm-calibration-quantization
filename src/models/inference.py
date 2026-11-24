@@ -124,3 +124,4 @@ def extract_logits_unified(
         model_id=model_id,
         should_stop=should_stop,
     )
+
