@@ -262,7 +262,7 @@ def show_status(cfg: Any, matrix: list[dict[str, Any]]) -> None:
     print(hdr_line)
     print(sep)
     for r in rows:
-        line = "| " + " | ".join(r[k].ljust(col_widths[i]) for i, h in enumerate(headers)) + " |"
+        line = "| " + " | ".join(r[k].ljust(col_widths[i]) for i, k in enumerate(col_keys)) + " |"
         print(line)
     print(sep + "\n")
 
