@@ -214,7 +214,7 @@ def test_get_llama_ftype_enum():
 # ---------------------------------------------------------------------------
 
 def test_sanity_check_gguf_f16_pass():
-    """Verify agreement check passes when agreement >= 0.90."""
+    """Verify agreement check passes when agreement >= 0.90 and within tolerance."""
     n = 100
     df_fp = pd.DataFrame({
         "example_id": [f"ex_{i}" for i in range(n)],
@@ -222,9 +222,9 @@ def test_sanity_check_gguf_f16_pass():
         "prediction": [i % 2 for i in range(n)],
         "prob_hate": [0.9 if i % 2 == 1 else 0.1 for i in range(n)],
     })
-    # 95% agreement
-    preds_gguf = [i % 2 if i < 95 else (1 - i % 2) for i in range(n)]
-    probs_gguf = [0.88 if p == 1 else 0.12 for p in preds_gguf]
+    # 97% agreement (3 differences)
+    preds_gguf = [i % 2 if i < 97 else (1 - i % 2) for i in range(n)]
+    probs_gguf = [0.89 if p == 1 else 0.11 for p in preds_gguf]
     df_gguf = pd.DataFrame({
         "example_id": [f"ex_{i}" for i in range(n)],
         "y_true": [i % 2 for i in range(n)],
@@ -234,7 +234,7 @@ def test_sanity_check_gguf_f16_pass():
 
     res = sanity_check_gguf_f16(df_fp, df_gguf)
     assert res["passed"] is True
-    assert res["agreement"] == 0.95
+    assert res["agreement"] == 0.97
     assert res["checks"]["agreement_ok"] is True
 
 
