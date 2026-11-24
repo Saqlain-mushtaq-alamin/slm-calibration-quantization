@@ -373,6 +373,38 @@ def run_one_quant_b(
         except Exception as exc:
             LOG.warning("Failed to parse existing manifest for %s (%s); re-running", name, exc)
 
+    # Stop quantizing after a T7.5 failure (Critical Gate)
+    if method != "f16":
+        f16_artifact = f"{base_run}__f16"
+        f16_json_path = runs_dir / f"{f16_artifact}.json"
+        if f16_json_path.is_file():
+            try:
+                f16_prev = json.loads(f16_json_path.read_text(encoding="utf-8"))
+                t7_5 = f16_prev.get("T7.5") or {}
+                if t7_5.get("passed") is False:
+                    LOG.error(
+                        "HALT: Skipping %s because base GGUF F16 (%s) failed critical gate T7.5",
+                        name,
+                        f16_artifact,
+                    )
+                    manifest["status"] = "skipped_f16_gate_failed"
+                    manifest["error"] = f"Base GGUF F16 ({f16_artifact}) failed critical gate T7.5"
+                    manifest["wall_s"] = 0.0
+                    manifest["environment"] = collect_env_snapshot()
+                    write_run_json(
+                        run_json_path,
+                        phase=7,
+                        phase_name="post_training_quantization_track_b_gguf_llama_cpp",
+                        status=manifest["status"],
+                        payload={k: v for k, v in manifest.items() if k not in {"phase", "phase_name", "status"}},
+                        seed=seed,
+                        config_hash=manifest["config_hash"],
+                        git_commit=manifest["git_commit"],
+                    )
+                    return manifest
+            except Exception as exc:
+                LOG.warning("Failed to inspect base F16 manifest %s: %s", f16_json_path, exc)
+
     t_start = time.perf_counter()
     f16_gguf_path = quant_models_dir / f"{base_run}__f16.gguf"
     llm = None
