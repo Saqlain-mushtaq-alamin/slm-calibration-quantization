@@ -344,8 +344,8 @@ def test_run_one_quant_b_lifecycle(tmp_path, track_b_config):
     fake_f16 = tmp_path / "quantized" / "mock_bn_qwen_s42__f16.gguf"
     fake_q8 = tmp_path / "quantized" / "mock_bn_qwen_s42__q8_0.gguf"
     fake_f16.parent.mkdir(parents=True, exist_ok=True)
-    fake_f16.write_bytes(b"GGUF" + b"\x00" * 2000000)
-    fake_q8.write_bytes(b"GGUF" + b"\x00" * 1000000)
+    fake_f16.write_bytes(b"GGUF" + b"\x00" * (4 * 1024 * 1024))
+    fake_q8.write_bytes(b"GGUF" + b"\x00" * (2 * 1024 * 1024))
 
     def mock_extract(llm, dataset, **kwargs):
         n = len(dataset)
