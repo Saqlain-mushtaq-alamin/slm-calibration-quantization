@@ -344,6 +344,11 @@ def run_one_quant_b(
         "seed": seed,
         "source_phase": cell["source_phase"],
         "merged_dir": _dev(Path(merged_dir)),
+        "backend": "llama.cpp",
+        "llama_cpp_version": getattr(llama_cpp, "__version__", "unknown"),
+        "n_gpu_layers": n_gpu_layers if n_gpu_layers is not None else int(cfg["track_b"]["runtime"].get("n_gpu_layers", -1)),
+        "gpu_offload_supported": bool(llama_cpp.llama_supports_gpu_offload()),
+        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None",
         "config_hash": config_hash(cfg),
         "git_commit": get_git_commit(str(ROOT)),
     }
