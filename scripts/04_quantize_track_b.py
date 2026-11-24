@@ -45,6 +45,7 @@ if str(ROOT) not in sys.path:
 import numpy as np
 import pandas as pd
 import torch
+import llama_cpp
 from omegaconf import OmegaConf
 
 from src.data.assemble import SPLIT_PARTS, build_split_frames
