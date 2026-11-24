@@ -416,6 +416,13 @@ def load_gguf_model(
     if not is_valid_gguf_file(model_p):
         raise FileNotFoundError(f"GGUF model file not found or invalid: {model_p}")
 
+    if n_gpu_layers != 0 and not check_llama_gpu_support():
+        LOG.warning(
+            "GPU offload requested (n_gpu_layers=%s) but installed llama-cpp-python does not support CUDA "
+            "(llama_supports_gpu_offload() == False). Execution will run on CPU only.",
+            n_gpu_layers,
+        )
+
     init_kwargs: dict[str, Any] = {
         "model_path": str(model_p),
         "n_ctx": n_ctx,
@@ -532,8 +539,8 @@ def extract_logits_llamacpp(
         t_start = time.perf_counter()
         for idx, row in enumerate(dataset.itertuples(index=False)):
             if should_stop and should_stop():
-                LOG.warning("Logit extraction stopped early at index %d / %d", idx, n_examples)
-                break
+                LOG.warning("Logit extraction cancelled by user/signal at %d / %d", idx, n_examples)
+                raise KeyboardInterrupt(f"Logit extraction interrupted at index {idx} / {n_examples}")
 
             ex_id = str(getattr(row, "example_id", idx))
             raw_text = str(getattr(row, "text", ""))
@@ -542,15 +549,25 @@ def extract_logits_llamacpp(
             prompt = build_prompt(raw_text, template)
             tokens = llm.tokenize(prompt.encode("utf-8"), add_bos=True)
             if len(tokens) > max_len:
-                tokens = tokens[-max_len:]
+                bos_id = getattr(llm, "token_bos", lambda: -1)() if callable(getattr(llm, "token_bos", None)) else -1
+                if tokens and tokens[0] == bos_id:
+                    tokens = [tokens[0]] + tokens[-(max_len - 1):]
+                else:
+                    tokens = tokens[-max_len:]
 
             llm.reset()
             llm.eval(tokens)
 
             # Answer position is the last token evaluated: n_tokens - 1
             ans_pos = llm.n_tokens - 1
-            z_hate = float(llm.scores[ans_pos, hate_token_id])
-            z_nonhate = float(llm.scores[ans_pos, nonhate_token_id])
+            if hasattr(llm, "scores") and llm.scores is not None and llm.scores.shape[0] > ans_pos and llm.context_params.logits_all:
+                z_hate = float(llm.scores[ans_pos, hate_token_id])
+                z_nonhate = float(llm.scores[ans_pos, nonhate_token_id])
+            else:
+                import llama_cpp
+                raw_logits = llama_cpp.llama_get_logits(llm.ctx)
+                z_hate = float(raw_logits[hate_token_id])
+                z_nonhate = float(raw_logits[nonhate_token_id])
 
             example_ids.append(ex_id)
             y_true_list.append(y_label)
@@ -616,9 +633,17 @@ def sanity_check_gguf_f16(
     fp_df["example_id"] = fp_df["example_id"].astype(str)
     gguf_df["example_id"] = gguf_df["example_id"].astype(str)
 
+    fp_ids = set(fp_df["example_id"])
+    gguf_ids = set(gguf_df["example_id"])
+    if fp_ids != gguf_ids:
+        diff = fp_ids.symmetric_difference(gguf_ids)
+        raise ValueError(
+            f"example_id sets are not identical: {len(diff)} mismatched IDs (e.g. {list(diff)[:5]})"
+        )
+
     aligned = pd.merge(fp_df, gguf_df, on="example_id", suffixes=("_fp", "_gguf"))
-    if aligned.empty:
-        raise ValueError("No overlapping example_ids between FP reference and GGUF logits.")
+    if aligned.empty or len(aligned) != len(gguf_df):
+        raise ValueError(f"Aligned row count ({len(aligned)}) does not match GGUF count ({len(gguf_df)})")
 
     y_true_col = "y_true_fp" if "y_true_fp" in aligned.columns else "y_true"
     y_true = aligned[y_true_col].to_numpy(dtype=np.int64)

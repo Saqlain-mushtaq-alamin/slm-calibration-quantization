@@ -160,6 +160,7 @@ def build_quant_matrix_b(
 
             # Must have a valid merged directory (is_valid_merged); do not fall back to adapter dir
             if not is_valid_merged(merged_dir):
+                LOG.warning("Skipping source run %s: no valid merged directory found at %s", run_name, merged_dir)
                 continue
 
             parsed = parse_run_name(run_name)
