@@ -843,17 +843,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Phase 6: Post-Training Quantization Track A (GPU / Hugging Face)")
+    parser = argparse.ArgumentParser(description="Post-Training Quantization — Track A (HF) or Track B (GGUF)")
+    parser.add_argument("--track", choices=["a", "b", "A", "B"], default="a", help="Quantization track: 'a' for GPU/HF (Phase 6) or 'b' for GGUF/llama.cpp (Phase 7)")
     parser.add_argument("--smoke", action="store_true", help="fast rehearsal with capped eval/calibration")
     parser.add_argument("--models", nargs="+", default=[], help="filter by base model key")
-    parser.add_argument("--methods", nargs="+", default=[], help="filter by method (bnb_int8, bnb_nf4, gptq_int4)")
+    parser.add_argument("--methods", nargs="+", default=[], help="filter by method (bnb_int8, bnb_nf4, gptq_int4 / f16, q8_0, q4_k_m, q3_k_m)")
     parser.add_argument("--languages", nargs="+", default=[], help="filter by language (bn, en)")
     parser.add_argument("--seeds", nargs="+", type=int, default=[], help="filter by seed")
     parser.add_argument("--max-eval", type=int, default=0, help="cap eval examples per set")
     parser.add_argument("--force", action="store_true", help="re-run completed artifacts")
     parser.add_argument("--status", action="store_true", help="show quantization status table and exit")
     parser.add_argument("--dry-run", action="store_true", help="print planned artifacts and exit")
+    parser.add_argument("--config", type=str, default=None, help="custom config path")
+    parser.add_argument("--n-gpu-layers", type=int, default=None, help="GPU layers for Track B (-1 all, 0 CPU)")
+    parser.add_argument("--n-threads", type=int, default=None, help="CPU threads for Track B")
     args = parser.parse_args()
+
+    if args.track.lower() == "b":
+        import importlib
+        track_b_mod = importlib.import_module("scripts.04_quantize_track_b")
+        try:
+            track_b_mod.run(args)
+            return 0
+        except KeyboardInterrupt:
+            print("\n[STOPPED] Track B re-run the same command to resume\n")
+            return 0
 
     try:
         result = run(args)
