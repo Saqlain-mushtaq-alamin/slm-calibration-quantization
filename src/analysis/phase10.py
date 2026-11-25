@@ -6,6 +6,7 @@ import gc
 import json
 import statistics
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,39 @@ def _gpu_used_mb() -> float | None:
         return float(proc.stdout.strip().splitlines()[0]) if proc.returncode == 0 else None
     except Exception:
         return None
+
+
+class _ResourceMonitor:
+    """Sample system GPU memory and process RSS through load and inference."""
+
+    def __init__(self, interval_s: float = 0.1) -> None:
+        self.interval_s = interval_s
+        self.gpu_mb: list[float] = []
+        self.rss_mb: list[float] = []
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self):
+        import psutil
+
+        process = psutil.Process()
+
+        def sample() -> None:
+            while not self._stop.is_set():
+                gpu = _gpu_used_mb()
+                if gpu is not None:
+                    self.gpu_mb.append(gpu)
+                self.rss_mb.append(process.memory_info().rss / 1e6)
+                self._stop.wait(self.interval_s)
+
+        self._thread = threading.Thread(target=sample, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_args):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
 
 
 def _idle_power(seconds: float, sampling_hz: float = 10.0) -> float | None:
@@ -204,6 +238,7 @@ def measure_artifact(root: Path, item: dict[str, Any], *, warmup: int = 10,
     storage = artifact_storage(root, item)
     row: dict[str, Any] = {
         "phase": item["phase"], "artifact": item["artifact"], "method": item["method"],
+        "base_run": manifest.get("base_run_name") or item["artifact"],
         "model": manifest.get("model_key"), "seed": manifest.get("seed"),
         "language": manifest.get("language"), "source_status": manifest.get("status"),
         "backend": "llama.cpp" if item["phase"] == "phase7" else "HF",
@@ -218,24 +253,24 @@ def measure_artifact(root: Path, item: dict[str, Any], *, warmup: int = 10,
     row["gpu_temperature_before_c"] = gpu_temperature_c()
     try:
         prompts = _sample_texts(root, item)
-        load_start = time.perf_counter()
-        model, tokenizer, backend = _load_inference(root, item, Path(storage["model_path"]))
-        row["load_s"] = time.perf_counter() - load_start
-        fn, sync, lengths = _benchmark_fn(model, tokenizer, backend, prompts)
-        row["tokens_per_example_mean"] = float(np.mean(lengths))
-        row["tokens_per_example_p95"] = float(np.percentile(lengths, 95))
-        row["benchmark_prompt_tokens"] = lengths[len(lengths) // 2]
         row["idle_power_watts"] = _idle_power(idle_seconds)
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-        benchmark = measure_inference_blocks(fn, synchronize=sync, warmup=warmup, repeats=repeats)
+        with _ResourceMonitor() as resources:
+            load_start = time.perf_counter()
+            model, tokenizer, backend = _load_inference(root, item, Path(storage["model_path"]))
+            row["load_s"] = time.perf_counter() - load_start
+            fn, sync, lengths = _benchmark_fn(model, tokenizer, backend, prompts)
+            row["tokens_per_example_mean"] = float(np.mean(lengths))
+            row["tokens_per_example_p95"] = float(np.percentile(lengths, 95))
+            row["benchmark_prompt_tokens"] = lengths[len(lengths) // 2]
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            benchmark = measure_inference_blocks(fn, synchronize=sync, warmup=warmup, repeats=repeats)
         row.update({k: v for k, v in benchmark.items() if k != "blocks"})
         row["block_details"] = benchmark["blocks"]
-        after_gpu = _gpu_used_mb()
         torch_peak = torch.cuda.max_memory_allocated() / 1e6 if backend == "hf" and torch.cuda.is_available() else None
-        row["peak_vram_mb"] = (max(after_gpu - before_gpu, 0.0) if before_gpu is not None and after_gpu is not None else torch_peak)
-        row["vram_measurement"] = "NVML_device_delta" if before_gpu is not None and after_gpu is not None else "torch_allocated" if torch_peak is not None else None
-        row["host_ram_mb"] = max(psutil.Process().memory_info().rss / 1e6 - before_rss, 0.0)
+        row["peak_vram_mb"] = (max(max(resources.gpu_mb) - before_gpu, 0.0) if before_gpu is not None and resources.gpu_mb else torch_peak)
+        row["vram_measurement"] = "NVML_sampled_device_delta" if before_gpu is not None and resources.gpu_mb else "torch_allocated" if torch_peak is not None else None
+        row["peak_host_ram_mb"] = max(max(resources.rss_mb) - before_rss, 0.0) if resources.rss_mb else None
         row["gpu_temperature_after_c"] = gpu_temperature_c()
         limit = gpu_power_limit_w()
         idle = row["idle_power_watts"]
