@@ -271,7 +271,7 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
             return rows, "success", None
         if ablation == "A6":
             from omegaconf import OmegaConf
-            from src.models.finetune import finetune_lora, load_base_model, subsample
+            from src.models.finetune import finetune_lora, load_base_model
             fraction = int(variant.removeprefix("scale_"))
             if fraction == 100 and not smoke:
                 rows = []
@@ -324,7 +324,7 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
         if ablation == "A3":
             from omegaconf import OmegaConf
             from peft import PeftModel
-            from src.models.finetune import finetune_lora, subsample
+            from src.models.finetune import finetune_lora
             baseline_path = ROOT / ("configs/baseline/default.yaml" if language == "bn"
                                     else "configs/baseline/english_control.yaml")
             train_cfg = OmegaConf.to_container(load_config(baseline_path), resolve=True)
