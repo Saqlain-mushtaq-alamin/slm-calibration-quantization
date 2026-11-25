@@ -61,7 +61,7 @@ def evaluate_file(path: Path, root: Path) -> dict:
     base_run = artifact.rsplit("__", 1)[0] if phase in {"phase6", "phase7", "phase7_smoke"} else (
         "pilot" if phase == "pilot" else artifact
     )
-    for column in ("seed", "language"):
+    for column in ("seed", "language", "model_key" if "model_key" in frame else "model"):
         _constant(frame, column, path)
     if frame["example_id"].isna().any() or frame["example_id"].duplicated().any():
         raise ValueError(f"{path}: null or duplicate example_id")
@@ -73,9 +73,9 @@ def evaluate_file(path: Path, root: Path) -> dict:
         raise ValueError(f"{path}: labels/predictions must be binary")
     if not np.isfinite(p).all() or not np.isfinite(other).all() or (p < 0).any() or (p > 1).any() or not np.allclose(p + other, 1, atol=1e-5):
         raise ValueError(f"{path}: invalid probabilities")
-    if "logit_hate" in frame and "logit_nonhate" in frame:
-        if not np.isfinite(frame[["logit_hate", "logit_nonhate"]].to_numpy(dtype=np.float64)).all():
-            raise ValueError(f"{path}: nonfinite logits")
+    if ("logit_hate" in frame and "logit_nonhate" in frame
+            and not np.isfinite(frame[["logit_hate", "logit_nonhate"]].to_numpy(dtype=np.float64)).all()):
+        raise ValueError(f"{path}: nonfinite logits")
     task = compute_all_task_metrics(y, pred, p)
     single_class = bool(np.unique(y).size == 1)
     if single_class:

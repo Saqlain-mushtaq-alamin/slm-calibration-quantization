@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.analysis.phase8 import compute_deltas_vs_fp, discover_logits, evaluate_all_artifacts
+from src.analysis.phase8 import (
+    compute_deltas_vs_fp,
+    discover_logits,
+    evaluate_all_artifacts,
+)
 
 
 def _write(root, phase, artifact, method, split, probabilities, *, ids=None, labels=None):
