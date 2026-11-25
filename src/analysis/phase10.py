@@ -279,7 +279,7 @@ def measure_artifact(root: Path, item: dict[str, Any], *, warmup: int = 10,
         "language": manifest.get("language"), "source_status": manifest.get("status"),
         "backend": "llama.cpp" if item["phase"] == "phase7" else "HF",
         **storage, "warmup": warmup, "repeats_per_block": repeats, "blocks": 2,
-        "benchmark_version": 4,
+        "benchmark_version": 5,
     }
     if manifest.get("status") != "success":
         row.update({"status": "source_failed", "error": manifest.get("error")})
@@ -302,7 +302,8 @@ def measure_artifact(root: Path, item: dict[str, Any], *, warmup: int = 10,
             row["benchmark_prompt_tokens"] = lengths[len(lengths) // 2]
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
-            benchmark = measure_inference_blocks(fn, synchronize=sync, warmup=warmup, repeats=repeats)
+            benchmark = measure_inference_blocks(fn, synchronize=sync, warmup=warmup,
+                                                 repeats=repeats, temperature_reader=gpu_temperature_c)
         row.update({k: v for k, v in benchmark.items() if k != "blocks"})
         row["block_details"] = benchmark["blocks"]
         torch_peak = torch.cuda.max_memory_allocated() / 1e6 if backend == "hf" and torch.cuda.is_available() else None
@@ -325,7 +326,7 @@ def measure_artifact(root: Path, item: dict[str, Any], *, warmup: int = 10,
         else:
             row["energy_per_1k_joules"] = None
             row["energy_repeat_relative_diff"] = None
-        temp_a, temp_b = row["gpu_temperature_before_c"], row["gpu_temperature_after_c"]
+        temp_a, temp_b = row["measurement_temperature_start_c"], row["measurement_temperature_end_c"]
         row["latency_stable"] = bool(row["latency_cv_max"] < 0.15)
         row["thermal_stable"] = bool(temp_a is not None and temp_b is not None and abs(temp_b - temp_a) < 5)
         row["energy_stable"] = bool(row["energy_repeat_relative_diff"] is not None and row["energy_repeat_relative_diff"] < 0.15)
@@ -360,7 +361,7 @@ def run_sweep(root: Path, results_dir: Path, *, warmup: int = 10, repeats: int =
         if target.is_file() and not force:
             row = json.loads(target.read_text(encoding="utf-8"))
             if (row.get("warmup") != warmup or row.get("repeats_per_block") != repeats
-                    or row.get("benchmark_version") != 4):
+                    or row.get("benchmark_version") != 5):
                 raise ValueError(f"Benchmark protocol changed for {target}; use --force")
         else:
             cmd = [sys.executable, "-m", "src.analysis.phase10_worker",
@@ -375,7 +376,7 @@ def run_sweep(root: Path, results_dir: Path, *, warmup: int = 10, repeats: int =
                 row = {"phase": item["phase"], "artifact": item["artifact"],
                        "base_run": item["manifest"].get("base_run_name") or item["artifact"],
                        "method": item["method"], "status": "failed",
-                       "benchmark_version": 4, "warmup": warmup, "repeats_per_block": repeats,
+                       "benchmark_version": 5, "warmup": warmup, "repeats_per_block": repeats,
                        "error": (proc.stderr or proc.stdout)[-2000:] or f"Worker exit {proc.returncode}"}
                 atomic_write_json(target, row)
         rows.append(row)

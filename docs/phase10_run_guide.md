@@ -38,6 +38,7 @@ Energy requires actual GPU board-power samples at 10 Hz. When NVML and
 null, and T10.3/T10.4 fail. Values are never estimated from TDP. The
 current RTX 4060 driver reports `N/A` for power draw, so full Phase 10
 energy acceptance requires a power-capable driver or external meter.
-Temperature stability requires a before/after difference below 5 °C;
+Temperature stability requires a difference below 5 °C from after warmup
+to the end of the timed blocks;
 latency stability requires CV below 0.15. Memory ordering compares matched
 precisions of the same base run within each backend track.

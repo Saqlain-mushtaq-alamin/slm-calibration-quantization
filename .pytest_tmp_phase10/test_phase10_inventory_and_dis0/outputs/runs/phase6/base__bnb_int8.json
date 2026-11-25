@@ -1,0 +1,1 @@
+{"status": "success", "artifact_name": "base__bnb_int8", "method": "bnb_int8", "model_path": "model/bf16", "artifact_dir": "model/gptq", "artifacts": {"merged_path": "model/bf16"}}

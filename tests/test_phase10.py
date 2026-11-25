@@ -47,11 +47,14 @@ def test_phase10_benchmark_warmup_and_missing_power():
         calls.append(1)
 
     result = measure_inference_blocks(infer, warmup=3, repeats=5, blocks=2,
-                                      power_reader=lambda: None)
+                                      power_reader=lambda: None,
+                                      temperature_reader=iter([50.0, 52.0]).__next__)
     assert len(calls) == 13
     assert result["power_available"] is False
     assert result["latency_p50_ms"] > 0
     assert result["throughput_examples_per_sec"] > 0
+    assert result["measurement_temperature_start_c"] == 50.0
+    assert result["measurement_temperature_end_c"] == 52.0
     assert all(block["active_energy_j"] is None for block in result["blocks"])
 
 

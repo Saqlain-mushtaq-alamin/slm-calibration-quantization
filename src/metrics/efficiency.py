@@ -250,6 +250,7 @@ def measure_inference_blocks(
     repeats: int = 100,
     blocks: int = 2,
     power_reader=read_gpu_power_w,
+    temperature_reader=None,
     sampling_hz: float = 10.0,
 ) -> dict[str, Any]:
     """Time repeated synchronized inferences and integrate sampled board power.
@@ -264,6 +265,7 @@ def measure_inference_blocks(
     for _ in range(warmup):
         fn()
         synchronize()
+    temperature_start = temperature_reader() if temperature_reader is not None else None
     initial_power = power_reader()
     out = []
     for _ in range(blocks):
@@ -312,6 +314,7 @@ def measure_inference_blocks(
             "active_energy_j": energy_j,
             "n_power_samples": len(samples),
         })
+    temperature_end = temperature_reader() if temperature_reader is not None else None
     return {
         "blocks": out,
         "latency_p50_ms": float(np.median([b["latency_p50_ms"] for b in out])),
@@ -319,6 +322,8 @@ def measure_inference_blocks(
         "latency_cv_max": max(b["latency_cv"] for b in out),
         "throughput_examples_per_sec": float(np.median([b["throughput_examples_per_sec"] for b in out])),
         "power_available": initial_power is not None,
+        "measurement_temperature_start_c": temperature_start,
+        "measurement_temperature_end_c": temperature_end,
     }
 
 
