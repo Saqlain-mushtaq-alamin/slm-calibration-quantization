@@ -26,6 +26,8 @@ outputs/runs/
 outputs/results/
 outputs/figures/
 outputs/tables/
+outputs/phase12_smoke/
+outputs/phase12_work/
 outputs/environment_versions.json
 gptq_log_*.log
 *.gguf

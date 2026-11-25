@@ -169,6 +169,7 @@ def quantize_gptq(
     max_len: int = 256,
     device: str = "cuda:0",
     trust_remote_code: bool = False,
+    dynamic: dict[str, dict[str, int | bool]] | None = None,
 ) -> dict[str, Any]:
     """GPTQ weight-only quantization via GPTQModel.
 
@@ -208,7 +209,9 @@ def quantize_gptq(
             except Exception:
                 dynamic_enum = None
     quant_kwargs: dict[str, Any] = {"bits": bits, "group_size": group_size, "desc_act": True}
-    if dynamic_enum is not None:
+    if dynamic is not None:
+        quant_kwargs["dynamic"] = dynamic
+    elif dynamic_enum is not None:
         quant_kwargs["dynamic"] = dynamic_enum
     quant_config = QuantizeConfig(**quant_kwargs)
 
@@ -282,7 +285,7 @@ def quantize_gptq(
         "bits": bits,
         "group_size": group_size,
         "desc_act": True,
-        "dynamic": dynamic_enum is not None,
+        "dynamic": dynamic if dynamic is not None else dynamic_enum is not None,
         "n_calib": len(calib_texts),
         "output_path": str(output_path),
         "load_s": load_s,

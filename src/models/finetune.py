@@ -365,7 +365,7 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
     Returns a :class:`FinetuneResult`; the merged model is written to
     ``<output_dir>/merged``.
     """
-    from peft import LoraConfig, TaskType, get_peft_model
+    from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
     from src.metrics.efficiency import Stopwatch
     from transformers import Trainer, TrainingArguments, set_seed as hf_set_seed
 
@@ -390,11 +390,19 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
         token_ids = assert_single_token_verbalizer(tokenizer, verbalizer)
         LOG.info("Verbalizer token ids: %s", token_ids)
 
-        model = load_base_model(
-            model_cfg["hf_id"],
-            str(model_cfg.get("dtype", "bfloat16")),
-            attn_implementation=model_cfg.get("attn_implementation") or None,
-        )
+        qlora = str(train_cfg.get("quantization", "none")) == "nf4"
+        if qlora:
+            from src.models.quantize_track_a import load_quantized_hf
+            model = load_quantized_hf(model_cfg["hf_id"], "bnb_nf4")
+            model = prepare_model_for_kbit_training(
+                model, use_gradient_checkpointing=bool(train_cfg.get("grad_checkpointing", True))
+            )
+        else:
+            model = load_base_model(
+                model_cfg["hf_id"],
+                str(model_cfg.get("dtype", "bfloat16")),
+                attn_implementation=model_cfg.get("attn_implementation") or None,
+            )
         model.config.pad_token_id = tokenizer.pad_token_id
 
         lora_config = LoraConfig(
@@ -503,13 +511,15 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
         ]
         best_ckpt = getattr(trainer.state, "best_model_checkpoint", None)
 
-        # Merge adapter into the base weights -> standalone model for PTQ.
+        # QLoRA stays as an NF4 base plus trained adapter. Merging into 4-bit
+        # weights would change the comparison and may not be supported by PEFT.
         merged_dir = output_dir / "merged"
-        merged = trainer.model.merge_and_unload()
-        merged.config.use_cache = True
-        merged.save_pretrained(str(merged_dir), safe_serialization=True)
-        tokenizer.save_pretrained(str(merged_dir))
-        atomic_write_text(merged_dir / ".completed", "ok\n")
+        if not qlora:
+            merged = trainer.model.merge_and_unload()
+            merged.config.use_cache = True
+            merged.save_pretrained(str(merged_dir), safe_serialization=True)
+            tokenizer.save_pretrained(str(merged_dir))
+            atomic_write_text(merged_dir / ".completed", "ok\n")
 
     train_losses = [h["loss"] for h in history if "loss" in h]
     loss_decreased = bool(
@@ -544,7 +554,7 @@ def finetune_lora(config: dict[str, Any], train_df: pd.DataFrame, val_df: pd.Dat
 
     return FinetuneResult(
         adapter_path=str(output_dir / "adapter"),
-        merged_path=str(merged_dir),
+        merged_path="" if qlora else str(merged_dir),
         history=history,
         best_eval_loss=float(metrics.get("eval_loss")) if metrics.get("eval_loss") is not None else None,
         n_train=len(train_ds),

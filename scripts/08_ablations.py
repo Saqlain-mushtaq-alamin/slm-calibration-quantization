@@ -54,7 +54,7 @@ def _cells(cfg, models: list[str], languages: list[str], seeds: list[int], ablat
             for seed in seeds:
                 base = f"{language}_{model}_lora_bf16_s{seed}"
                 merged = _path(cfg["paths"]["phase4_models" if language == "bn" else "phase5_models"]) / base / "merged"
-                if any(a in ablations for a in ("A1", "A2", "A5")) and not (merged / "config.json").is_file():
+                if any(a in ablations for a in ("A1", "A2", "A4", "A5", "A6", "A7")) and not (merged / "config.json").is_file():
                     raise FileNotFoundError(f"Missing merged FP checkpoint: {merged}")
                 if "A1" in ablations:
                     for variant in CALIB_VARIANTS:
@@ -66,6 +66,15 @@ def _cells(cfg, models: list[str], languages: list[str], seeds: list[int], ablat
                 if "A5" in ablations:
                     for group in (128, 32):
                         cells.append(("A5", language, model, seed, base, "gptq_int4", f"group_{group}", merged))
+                if "A4" in ablations:
+                    for variant in ("attention_only", "mlp_only"):
+                        cells.append(("A4", language, model, seed, base, "gptq_int4", variant, merged))
+                if "A7" in ablations:
+                    cells.append(("A7", language, model, seed, base, "gptq_int3", "int3", merged))
+                    cells.append(("A7", language, model, seed, base, "gguf_q2_k", "q2_k", merged))
+                if "A6" in ablations:
+                    for fraction in (10, 25, 100):
+                        cells.append(("A6", language, model, seed, base, "lora_bf16", f"scale_{fraction}", merged))
     return cells
 
 
@@ -104,7 +113,7 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
     template = str(cfg["prompt_templates"][language]["baseline"])
     model = None
     try:
-        if ablation in ("A1", "A5"):
+        if ablation in ("A1", "A4", "A5", "A7") and method != "gguf_q2_k":
             if method == "awq_int4":
                 return [], "unavailable", "AWQ driver is absent in the current Track A stack"
             if ablation == "A1":
@@ -119,7 +128,8 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
                 calib = sets[variant]
                 group = 128
             else:
-                # A5 holds calibration data fixed while varying group size.
+                # A4/A5/A7 hold the calibration data fixed while changing only
+                # the declared quantization setting.
                 train = frames["train"]
                 count = 8 if smoke else int(cfg["calibration_samples"])
                 if len(train) < count:
@@ -128,10 +138,15 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
                 from src.models.finetune import build_prompt
                 calib = {"prompts": [build_prompt(t, template) for t in selected["text"].astype(str)],
                          "ids": selected["example_id"].astype(str).tolist()}
-                group = int(variant.removeprefix("group_"))
+                group = int(variant.removeprefix("group_")) if ablation == "A5" else 128
+            dynamic = None
+            if ablation == "A4":
+                dynamic = ({"-:.*\\.mlp\\..*": {}} if variant == "attention_only"
+                           else {"-:.*\\.self_attn\\..*": {}})
             quant_dir = output_root / "quantized" / ablation / base / variant
             quant_info = quantize_gptq(str(merged), calib["prompts"], str(quant_dir),
-                                       bits=4, group_size=group, max_len=int(cfg["max_len"]))
+                                       bits=3 if method == "gptq_int3" else 4,
+                                       group_size=group, max_len=int(cfg["max_len"]), dynamic=dynamic)
             model, tokenizer = load_gptq(str(quant_dir))
             rows = _evaluate(model, tokenizer, frames, cfg=cfg, template=template,
                              ablation=ablation, base=base, method=method, variant=variant,
@@ -142,6 +157,39 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
                             __import__("hashlib").sha256(json.dumps(calib["ids"]).encode()).hexdigest(),
                             "group_size": group, "quantize_s": quant_info["quantize_s"]})
             return rows, "success", None
+        if ablation == "A7" and method == "gguf_q2_k":
+            from src.models.quantize_track_b import (
+                extract_logits_llamacpp, free_gguf, is_valid_gguf_file,
+                load_gguf_model, quantize_gguf,
+            )
+            source = ROOT / "outputs/quantized/track_b" / f"{base}__f16.gguf"
+            if not is_valid_gguf_file(source):
+                raise FileNotFoundError(f"A7 requires Phase 7 F16 GGUF: {source}")
+            target = output_root / "quantized/A7" / base / "q2_k.gguf"
+            info = quantize_gguf(source, target, "q2_k")
+            llm = load_gguf_model(target, n_ctx=512, n_gpu_layers=-1, verbose=False, logits_all=True)
+            try:
+                tokenizer = load_tokenizer(str(merged))
+                rows = []
+                for split in cfg["eval_sets"]:
+                    expected = frames[str(split)].head(16).copy() if smoke else frames[str(split)]
+                    logit_frame = extract_logits_llamacpp(
+                        llm, expected, verbalizer=dict(cfg["verbalizer"]),
+                        split=str(split), max_len=int(cfg["max_len"]),
+                        template=template, model_id=base, tokenizer=tokenizer,
+                    )
+                    validate_ablation_logits(logit_frame, expected)
+                    path = output_root / "logits/A7" / base / method / variant / f"{split}.parquet"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    atomic_write_parquet(path, logit_frame)
+                    rows.append(metric_row(logit_frame, ablation_id="A7", artifact=base,
+                                           language=language, model=model_key, seed=seed,
+                                           method=method, variant=variant, eval_set=str(split),
+                                           split_sha256=split_sha, logit_file=str(path.relative_to(ROOT)),
+                                           quantize_s=info["quantize_s"], status="success"))
+                return rows, "success", None
+            finally:
+                free_gguf(llm)
         if ablation == "A2":
             from src.models.finetune import load_base_model
             template = str(cfg["prompt_templates"][language][variant])
@@ -150,6 +198,58 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
             rows = _evaluate(model, tokenizer, frames, cfg=cfg, template=template,
                              ablation=ablation, base=base, method=method, variant=variant,
                              split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke)
+            return rows, "success", None
+        if ablation == "A6":
+            from omegaconf import OmegaConf
+            from src.models.finetune import finetune_lora, load_base_model, subsample
+            fraction = int(variant.removeprefix("scale_"))
+            if fraction == 100 and not smoke:
+                rows = []
+                original_phase = "phase4" if language == "bn" else "phase5"
+                for split in cfg["eval_sets"]:
+                    path = ROOT / "outputs/logits" / original_phase / base / f"bf16__{split}.parquet"
+                    if not path.is_file():
+                        raise FileNotFoundError(f"Missing 100% baseline logits: {path}")
+                    expected = frames[str(split)]
+                    original = pd.read_parquet(path)
+                    validate_ablation_logits(original, expected)
+                    rows.append(metric_row(original, ablation_id="A6", artifact=base,
+                                           language=language, model=model_key, seed=seed,
+                                           method=method, variant=variant, eval_set=str(split),
+                                           split_sha256=split_sha, logit_file=str(path.relative_to(ROOT)),
+                                           train_fraction=1.0, n_train=len(frames["train"]),
+                                           status="success"))
+                return rows, "success", None
+            baseline_path = ROOT / ("configs/baseline/default.yaml" if language == "bn"
+                                    else "configs/baseline/english_control.yaml")
+            train_cfg = OmegaConf.to_container(load_config(baseline_path), resolve=True)
+            run_manifest = ROOT / "outputs/runs" / ("phase4" if language == "bn" else "phase5") / f"{base}.json"
+            if not run_manifest.is_file():
+                raise FileNotFoundError(f"Missing baseline model provenance: {run_manifest}")
+            resolved = json.loads(run_manifest.read_text(encoding="utf-8"))["resolved_hf_id"]
+            train_cfg["model"]["hf_id"] = resolved
+            entry = next(x for x in train_cfg["models"] if x["key"] == model_key)
+            train_cfg["model"]["attn_implementation"] = entry.get("attn_implementation")
+            train_cfg["experiment"] = {"seed": seed, "name": f"{base}__{variant}",
+                                       "output_dir": str(output_root / "models/A6" / base / variant)}
+            base_train = frames["train"]
+            if smoke:
+                base_train = subsample(base_train, min(len(base_train), 160), seed=seed)
+            n_train = max(2, round(len(base_train) * fraction / 100))
+            selected = subsample(base_train, n_train, seed=seed)
+            val = frames["id_val"].head(32).copy() if smoke else frames["id_val"]
+            trained = finetune_lora(train_cfg, selected, val)
+            if not trained.loss_decreased:
+                raise RuntimeError(f"A6 training loss did not decrease for {base}/{variant}")
+            model = load_base_model(trained.merged_path)
+            tokenizer = load_tokenizer(trained.merged_path)
+            rows = _evaluate(model, tokenizer, frames, cfg=cfg, template=template,
+                             ablation=ablation, base=base, method=method, variant=variant,
+                             split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke)
+            for row in rows:
+                row.update({"train_fraction": fraction / 100, "n_train": len(selected),
+                            "train_loss_decreased": trained.loss_decreased,
+                            "train_wall_s": trained.wall_s})
             return rows, "success", None
         raise ValueError(f"Unsupported ablation {ablation}")
     finally:
@@ -184,10 +284,12 @@ def _rebuild_results(manifests: list[Path], a8: pd.DataFrame | None, results_pat
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/ablation/default.yaml")
-    parser.add_argument("--ablations", nargs="+", choices=["A1", "A2", "A5", "A8"])
+    parser.add_argument("--ablations", nargs="+", choices=["A1", "A2", "A4", "A5", "A6", "A7", "A8"])
     parser.add_argument("--models", nargs="+")
     parser.add_argument("--languages", nargs="+", choices=["bn", "en"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[42])
+    parser.add_argument("--variants", nargs="+", help="Restrict A1/A2/A5 variants for a targeted run")
+    parser.add_argument("--methods", nargs="+", help="Restrict quantization/readout methods for a targeted run")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -197,6 +299,12 @@ def main() -> int:
     models = args.models or list(cfg["models"])
     languages = args.languages or list(cfg["languages"])
     cells = _cells(cfg, models, languages, args.seeds, ablations)
+    if args.variants:
+        cells = [cell for cell in cells if cell[6] in args.variants]
+    if args.methods:
+        cells = [cell for cell in cells if cell[5] in args.methods]
+    if not cells and "A8" not in ablations:
+        raise ValueError("No ablation cells match the requested filters")
     if args.dry_run:
         for cell in cells:
             print(" ".join(str(x) for x in cell[:7]))
@@ -210,7 +318,7 @@ def main() -> int:
     results_path = root / "results/ablation_results.csv"
     manifests = [_record_path(runs_root, c[0], c[4], c[5], c[6]) for c in cells]
     cache = {}
-    if any(cell[0] in ("A1", "A5", "A2") for cell in cells):
+    if any(cell[0] in ("A1", "A2", "A4", "A5", "A6", "A7") for cell in cells):
         for lang in ({cell[1] for cell in cells} | ({"bn", "en"} if "A1" in ablations else set())):
             cache[lang] = _frame_data(cfg, lang)
     failures = []
