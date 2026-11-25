@@ -63,6 +63,10 @@ def test_recalibration_uses_only_validation_and_transfers_fp(tmp_path):
     assert fits.query("artifact == @variant and arm == 'T_fp'").iloc[0].temperature == pytest.approx(
         fits.query("artifact == @base and arm == 'T_own'").iloc[0].temperature)
     assert (result.query("arm == 'none'").filter(like="delta_").abs() < 1e-12).all().all()
+    own_before = fits.query("artifact == @variant and arm == 'T_own'").iloc[0].temperature
+    _write(tmp_path, "phase6", variant, "bnb_int8", "id_test", [8, -8, 7, -7])
+    _, fits_after, _ = run_recalibration_experiment(tmp_path)
+    assert fits_after.query("artifact == @variant and arm == 'T_own'").iloc[0].temperature == own_before
 
 
 def test_oracle_is_labeled_and_only_evaluated_on_ood(tmp_path):

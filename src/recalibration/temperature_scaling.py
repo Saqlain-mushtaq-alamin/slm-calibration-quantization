@@ -30,7 +30,7 @@ def fit_temperature(logits: np.ndarray, y_true: np.ndarray, *, bounds=(0.01, 10.
     if not np.isfinite([low, high]).all() or low <= 0 or high <= low:
         raise ValueError("temperature bounds must satisfy 0 < low < high")
     if np.all(values[:, 1] == values[:, 0]):
-        return 1.0
+        return float(np.clip(1.0, low, high))
 
     def loss(log_t: float) -> float:
         scaled = values / np.exp(log_t)
