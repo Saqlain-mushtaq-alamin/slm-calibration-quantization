@@ -270,7 +270,7 @@ def measure_inference_blocks(
         samples: list[tuple[float, float]] = []
         stop = threading.Event()
 
-        def sample() -> None:
+        def sample(stop=stop, samples=samples) -> None:
             while not stop.is_set():
                 watts = power_reader()
                 if watts is not None and np.isfinite(watts) and watts > 0:
@@ -300,7 +300,8 @@ def measure_inference_blocks(
         if len(samples) >= 2:
             ts = np.asarray([x[0] for x in samples])
             pw = np.asarray([x[1] for x in samples])
-            energy_j = float(np.trapz(pw, ts))
+            integrate = getattr(np, "trapezoid", None) or np.trapz
+            energy_j = float(integrate(pw, ts))
         out.append({
             "latency_p50_ms": float(np.percentile(arr, 50)),
             "latency_p95_ms": float(np.percentile(arr, 95)),

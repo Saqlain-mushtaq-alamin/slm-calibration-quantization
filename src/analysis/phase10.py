@@ -17,7 +17,6 @@ import pandas as pd
 from src.metrics.efficiency import (
     gpu_power_limit_w,
     gpu_temperature_c,
-    hardware_summary,
     measure_inference_blocks,
     read_gpu_power_w,
 )
@@ -87,13 +86,13 @@ def _gpu_used_mb() -> float | None:
             return pynvml.nvmlDeviceGetMemoryInfo(handle).used / 1e6
         finally:
             pynvml.nvmlShutdown()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     try:
         proc = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
                               capture_output=True, text=True, timeout=20, check=False)
         return float(proc.stdout.strip().splitlines()[0]) if proc.returncode == 0 else None
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -169,6 +168,7 @@ def _sample_texts(root: Path, item: dict[str, Any], limit: int = 100) -> list[st
 
 def _load_inference(root: Path, item: dict[str, Any], path: Path):
     import torch
+
     from src.models import finetune as ft
 
     method = item["method"]
@@ -202,7 +202,10 @@ def _benchmark_fn(model, tokenizer, backend: str, prompts: list[str]):
 
     prompt = prompts[len(prompts) // 2]
     if backend == "hf":
-        from src.models.logit_extraction import answer_logits_batched, encode_label_token
+        from src.models.logit_extraction import (
+            answer_logits_batched,
+            encode_label_token,
+        )
 
         hate = encode_label_token(tokenizer, " A")
         nonhate = encode_label_token(tokenizer, " B")
@@ -293,7 +296,7 @@ def measure_artifact(root: Path, item: dict[str, Any], *, warmup: int = 10,
         row["energy_stable"] = bool(row["energy_repeat_relative_diff"] is not None and row["energy_repeat_relative_diff"] < 0.15)
         row["status"] = "complete" if all((row["latency_stable"], row["thermal_stable"], row["energy_stable"], row["peak_vram_mb"] is not None)) else "incomplete"
         return row
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         row.update({"status": "failed", "error": f"{type(exc).__name__}: {exc}"})
         return row
     finally:
@@ -328,3 +331,23 @@ def run_sweep(root: Path, results_dir: Path, *, warmup: int = 10, repeats: int =
         print(f"[{i}/{len(selected)}] {item['artifact']}: {row['status']}", flush=True)
     frame = pd.DataFrame(rows)
     return frame
+
+
+def memory_order_checks(frame: pd.DataFrame) -> dict[str, Any]:
+    """Compare matched precision variants within each backend track."""
+    checks = []
+    for base_run, group in frame.groupby("base_run"):
+        by_method = group.set_index("method")
+        for lower, higher in (("bnb_int8", "bf16"), ("bnb_nf4", "bnb_int8"),
+                              ("gptq_int4", "bnb_int8"), ("q8_0", "f16"),
+                              ("q4_k_m", "q8_0"), ("q3_k_m", "q4_k_m")):
+            if lower not in by_method.index or higher not in by_method.index:
+                continue
+            lo = by_method.loc[lower, "peak_vram_mb"]
+            hi = by_method.loc[higher, "peak_vram_mb"]
+            checks.append({"base_run": base_run, "lower_method": lower,
+                           "higher_method": higher, "passed": bool(pd.notna(lo) and pd.notna(hi) and lo < hi),
+                           "lower_mb": None if pd.isna(lo) else float(lo),
+                           "higher_mb": None if pd.isna(hi) else float(hi)})
+    return {"n_comparisons": len(checks), "n_passed": sum(c["passed"] for c in checks),
+            "passed": bool(checks and all(c["passed"] for c in checks)), "details": checks}

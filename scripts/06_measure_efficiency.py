@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.analysis.phase10 import discover_artifacts, run_sweep
+from src.analysis.phase10 import discover_artifacts, memory_order_checks, run_sweep
 from src.metrics.efficiency import hardware_summary
 from src.utils.logging_utils import write_run_json
 
@@ -34,8 +34,10 @@ def main() -> int:
         export.to_csv(args.results_dir / "efficiency_metrics.csv", index=False, na_rep="")
         export.to_parquet(args.results_dir / "efficiency_metrics.parquet", index=False)
         measured = table["status"].isin(["complete", "incomplete"])
+        memory = memory_order_checks(table)
         gates = {
             "T10.1_latency_cv": bool(measured.all() and table.loc[measured, "latency_stable"].all()),
+            "T10.2_memory_order": memory["passed"],
             "T10.3_energy_stability": bool(measured.all() and table.loc[measured, "energy_stable"].all()),
             "T10.4_idle_power": bool(measured.all() and table.loc[measured, "idle_power_watts"].notna().all()),
             "T10.5_thermal_stability": bool(measured.all() and table.loc[measured, "thermal_stable"].all()),
@@ -46,6 +48,7 @@ def main() -> int:
                        phase_name="efficiency_measurement", status=status,
                        payload={"n_artifacts_expected": total, "n_rows": len(table),
                                 "n_measured": int(measured.sum()), "gates": gates,
+                                "memory_order": memory,
                                 "hardware": hardware_summary(),
                                 "protocol": {"warmup": args.warmup, "repeats_per_block": args.repeats,
                                              "blocks": 2, "idle_seconds": args.idle_seconds}})
