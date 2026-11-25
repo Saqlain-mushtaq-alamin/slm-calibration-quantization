@@ -315,8 +315,10 @@ def measure_artifact(root: Path, item: dict[str, Any], *, warmup: int = 10,
         idle = row["idle_power_watts"]
         if idle is not None and limit is not None and 0 < idle < limit:
             energies = [
-                max(0.0, b["active_energy_j"] - idle * b["active_duration_s"]) * 1000 / repeats
-                for b in benchmark["blocks"] if b["active_energy_j"] is not None
+                (b["active_energy_j"] - idle * b["active_duration_s"]) * 1000 / repeats
+                for b in benchmark["blocks"]
+                if b["active_energy_j"] is not None
+                and b["active_energy_j"] > idle * b["active_duration_s"]
             ]
             row["energy_per_1k_joules"] = statistics.fmean(energies) if len(energies) == 2 else None
             row["energy_repeat_relative_diff"] = (

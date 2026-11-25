@@ -303,7 +303,10 @@ def measure_inference_blocks(
             ts = np.asarray([x[0] for x in samples])
             pw = np.asarray([x[1] for x in samples])
             integrate = getattr(np, "trapezoid", None) or np.trapz
-            energy_j = float(integrate(pw, ts))
+            inner = ts[(ts > start) & (ts < start + elapsed)]
+            grid = np.concatenate(([start], inner, [start + elapsed]))
+            watts = np.interp(grid, ts, pw, left=pw[0], right=pw[-1])
+            energy_j = float(integrate(watts, grid))
         out.append({
             "latency_p50_ms": float(np.percentile(arr, 50)),
             "latency_p95_ms": float(np.percentile(arr, 95)),

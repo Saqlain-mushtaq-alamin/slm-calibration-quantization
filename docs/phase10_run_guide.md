@@ -42,3 +42,20 @@ Temperature stability requires a difference below 5 °C from after warmup
 to the end of the timed blocks;
 latency stability requires CV below 0.15. Memory ordering compares matched
 precisions of the same base run within each backend track.
+
+## Current run
+
+The full sweep measured 144/144 artifacts (18 each of BF16, BNB INT8,
+BNB NF4, GPTQ INT4, GGUF F16, Q8_0, Q4_K_M, and Q3_K_M). The 90 required
+matched memory comparisons passed. One additional Q3_K_M versus Q4_K_M
+memory comparison failed and remains a diagnostic because that ordering
+is outside T10.2's INT8/INT4 requirement.
+
+Latency CV passed for 82/144 artifacts; thermal stability passed for
+66/144. All 144 idle-power and energy fields are unavailable because the
+GPU driver returns no board-power readings. The run manifest therefore
+records `status: incomplete`. These measurements support analysis of disk
+size, memory, latency, throughput, and tokens per example, but the Phase 10
+acceptance criteria are **not met** on this hardware/session. Reaching them
+requires a power-readable GPU or external meter and a controlled thermal
+environment, followed by `--force` to replace the current records.

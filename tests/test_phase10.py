@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pandas as pd
 import pytest
@@ -56,6 +57,17 @@ def test_phase10_benchmark_warmup_and_missing_power():
     assert result["measurement_temperature_start_c"] == 50.0
     assert result["measurement_temperature_end_c"] == 52.0
     assert all(block["active_energy_j"] is None for block in result["blocks"])
+
+
+def test_phase10_power_integrates_over_active_window():
+    def infer():
+        time.sleep(0.003)
+
+    result = measure_inference_blocks(infer, warmup=0, repeats=20, blocks=1,
+                                      power_reader=lambda: 20.0, sampling_hz=100)
+    block = result["blocks"][0]
+    assert block["n_power_samples"] >= 2
+    assert block["active_energy_j"] == pytest.approx(20 * block["active_duration_s"], rel=0.1)
 
 
 def test_phase10_memory_order_compares_only_matched_models():
