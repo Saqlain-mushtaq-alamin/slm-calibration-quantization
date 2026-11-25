@@ -21,7 +21,7 @@ from src.analysis.phase12 import (
     CALIB_VARIANTS, PROMPT_VARIANTS, calibration_sets, frozen_frames,
     metric_row, temperature_source_rows, validate_ablation_logits,
 )
-from src.models.finetune import load_tokenizer
+from src.models.finetune import build_prompt, load_tokenizer, subsample
 from src.models.logit_extraction import extract_logits_hf, probs_to_frame
 from src.models.quantize_track_a import free, load_gptq, load_quantized_hf, quantize_gptq, GPTQUnavailable
 from src.utils.atomic import atomic_write_csv, atomic_write_json, atomic_write_parquet
@@ -72,6 +72,7 @@ def _cells(cfg, models: list[str], languages: list[str], seeds: list[int], ablat
                 if "A2" in ablations:
                     for variant in PROMPT_VARIANTS:
                         cells.append(("A2", language, model, seed, base, "label_token", variant, merged))
+                    cells.append(("A2", language, model, seed, base, "linear_head", "baseline", merged))
                 if "A5" in ablations:
                     for group in (128, 32):
                         cells.append(("A5", language, model, seed, base, "gptq_int4", f"group_{group}", merged))
@@ -91,6 +92,36 @@ def _cells(cfg, models: list[str], languages: list[str], seeds: list[int], ablat
 
 def _record_path(out_root: Path, ablation: str, base: str, method: str, variant: str) -> Path:
     return out_root / ablation / base / f"{method}__{variant}.json"
+
+
+def _hidden_features(model, tokenizer, frame: pd.DataFrame, template: str, max_len: int) -> np.ndarray:
+    """Last real-token hidden state for a frozen, unmodified causal backbone."""
+    model.eval()
+    original_side = tokenizer.truncation_side
+    tokenizer.truncation_side = "left"
+    device = next(model.parameters()).device
+    features = []
+    try:
+        with torch.no_grad():
+            for start in range(0, len(frame), 4):
+                prompts = [build_prompt(t, template) for t in frame["text"].iloc[start:start + 4]]
+                inputs = tokenizer(prompts, padding=True, truncation=True,
+                                   max_length=max_len, return_tensors="pt")
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                output = model(**inputs, output_hidden_states=True, use_cache=False)
+                hidden = output.hidden_states[-1]
+                if tokenizer.padding_side == "left":
+                    positions = torch.full((len(prompts),), hidden.shape[1] - 1, device=device)
+                else:
+                    positions = inputs["attention_mask"].sum(dim=1) - 1
+                vectors = hidden[torch.arange(len(prompts), device=device), positions]
+                features.append(vectors.float().cpu().numpy())
+    finally:
+        tokenizer.truncation_side = original_side
+    result = np.concatenate(features)
+    if not np.isfinite(result).all():
+        raise ValueError("Nonfinite hidden features for A2 classification head")
+    return result
 
 
 def _evaluate(model, tokenizer, frames, *, cfg, template, ablation, base, method, variant, split_sha,
@@ -206,6 +237,34 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
             template = str(cfg["prompt_templates"][language][variant])
             model = load_base_model(str(merged))
             tokenizer = load_tokenizer(str(merged))
+            if method == "linear_head":
+                from sklearn.linear_model import LogisticRegression
+                n_probe = 32 if smoke else 2048
+                train = subsample(frames["train"], min(len(frames["train"]), n_probe), seed=seed)
+                features = _hidden_features(model, tokenizer, train, template, int(cfg["max_len"]))
+                head = LogisticRegression(max_iter=300, random_state=seed)
+                head.fit(features, train["label"].to_numpy(dtype=int))
+                head_path = output_root / "heads/A2" / base / "linear_head.npz"
+                head_path.parent.mkdir(parents=True, exist_ok=True)
+                np.savez(head_path, coef=head.coef_, intercept=head.intercept_, classes=head.classes_)
+                rows = []
+                for split in cfg["eval_sets"]:
+                    expected = frames[str(split)].head(16).copy() if smoke else frames[str(split)]
+                    values = _hidden_features(model, tokenizer, expected, template, int(cfg["max_len"]))
+                    margin = head.decision_function(values)
+                    logit_frame = probs_to_frame(expected["example_id"].astype(str), str(split),
+                                                 expected["label"], margin, np.zeros(len(margin)))
+                    validate_ablation_logits(logit_frame, expected)
+                    path = output_root / "logits/A2" / base / method / variant / f"{split}.parquet"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    atomic_write_parquet(path, logit_frame)
+                    rows.append(metric_row(logit_frame, ablation_id="A2", artifact=base,
+                                           language=language, model=model_key, seed=seed,
+                                           method=method, variant=variant, eval_set=str(split),
+                                           split_sha256=split_sha, logit_file=str(path.relative_to(ROOT)),
+                                           n_head_train=len(train), head_file=str(head_path.relative_to(ROOT)),
+                                           status="success"))
+                return rows, "success", None
             rows = _evaluate(model, tokenizer, frames, cfg=cfg, template=template,
                              ablation=ablation, base=base, method=method, variant=variant,
                              split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke)
