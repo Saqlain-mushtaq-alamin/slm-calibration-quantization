@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -13,6 +15,7 @@ if str(ROOT) not in sys.path:
 from src.analysis.phase10 import discover_artifacts, memory_order_checks, run_sweep
 from src.metrics.efficiency import hardware_summary
 from src.utils.logging_utils import write_run_json
+from src.utils.reproducibility import get_git_commit
 
 
 def main() -> int:
@@ -26,6 +29,10 @@ def main() -> int:
     args = parser.parse_args()
     args.results_dir.mkdir(parents=True, exist_ok=True)
     total = len(discover_artifacts(ROOT))
+    protocol = {"warmup": args.warmup, "repeats_per_block": args.repeats,
+                "blocks": 2, "idle_seconds": args.idle_seconds, "benchmark_version": 5}
+    protocol_hash = hashlib.sha256(json.dumps(protocol, sort_keys=True).encode("utf-8")).hexdigest()
+    git_commit = get_git_commit(str(ROOT))
     try:
         table = run_sweep(ROOT, args.results_dir, warmup=args.warmup,
                           repeats=args.repeats, idle_seconds=args.idle_seconds,
@@ -50,14 +57,15 @@ def main() -> int:
                                 "n_measured": int(measured.sum()), "gates": gates,
                                 "memory_order": memory,
                                 "hardware": hardware_summary(),
-                                "protocol": {"warmup": args.warmup, "repeats_per_block": args.repeats,
-                                             "blocks": 2, "idle_seconds": args.idle_seconds}})
+                                "protocol": protocol},
+                       config_hash=protocol_hash, git_commit=git_commit)
         print(f"Phase 10 {status}: {int(measured.sum())}/{total} measured; see {args.results_dir}")
         return 0 if status == "success" else 2
     except Exception as exc:
         write_run_json(args.results_dir / "phase10_run.json", phase=10,
                        phase_name="efficiency_measurement", status="failed",
-                       payload={"error": f"{type(exc).__name__}: {exc}"})
+                       payload={"error": f"{type(exc).__name__}: {exc}"},
+                       config_hash=protocol_hash, git_commit=git_commit)
         raise
 
 

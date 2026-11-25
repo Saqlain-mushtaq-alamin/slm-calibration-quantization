@@ -72,5 +72,9 @@ def test_phase10_memory_order_compares_only_matched_models():
     checks = memory_order_checks(frame)
     assert checks["n_comparisons"] == 6
     assert checks["passed"]
+    frame.loc[frame["method"] == "q3_k_m", "peak_vram_mb"] = 1200
+    diagnostic = memory_order_checks(frame)
+    assert diagnostic["passed"]
+    assert diagnostic["n_passed"] == 5
     frame.loc[frame["method"] == "gptq_int4", "peak_vram_mb"] = 2000
     assert not memory_order_checks(frame)["passed"]

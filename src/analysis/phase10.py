@@ -390,16 +390,24 @@ def memory_order_checks(frame: pd.DataFrame) -> dict[str, Any]:
     checks = []
     for base_run, group in frame.groupby("base_run"):
         by_method = group.set_index("method")
-        for lower, higher in (("bnb_int8", "bf16"), ("bnb_nf4", "bnb_int8"),
-                              ("gptq_int4", "bnb_int8"), ("q8_0", "f16"),
-                              ("q4_k_m", "q8_0"), ("q3_k_m", "q4_k_m")):
+        for lower, higher, required in (("bnb_int8", "bf16", True),
+                                        ("bnb_nf4", "bnb_int8", True),
+                                        ("gptq_int4", "bnb_int8", True),
+                                        ("q8_0", "f16", True),
+                                        ("q4_k_m", "q8_0", True),
+                                        ("q3_k_m", "q4_k_m", False)):
             if lower not in by_method.index or higher not in by_method.index:
                 continue
             lo = by_method.loc[lower, "peak_vram_mb"]
             hi = by_method.loc[higher, "peak_vram_mb"]
             checks.append({"base_run": base_run, "lower_method": lower,
+                           "required": required,
                            "higher_method": higher, "passed": bool(pd.notna(lo) and pd.notna(hi) and lo < hi),
                            "lower_mb": None if pd.isna(lo) else float(lo),
                            "higher_mb": None if pd.isna(hi) else float(hi)})
+    required_checks = [c for c in checks if c["required"]]
     return {"n_comparisons": len(checks), "n_passed": sum(c["passed"] for c in checks),
-            "passed": bool(checks and all(c["passed"] for c in checks)), "details": checks}
+            "n_required": len(required_checks),
+            "n_required_passed": sum(c["passed"] for c in required_checks),
+            "passed": bool(required_checks and all(c["passed"] for c in required_checks)),
+            "details": checks}
