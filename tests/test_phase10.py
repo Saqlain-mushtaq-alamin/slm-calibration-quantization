@@ -7,7 +7,11 @@ import json
 import pandas as pd
 import pytest
 
-from src.analysis.phase10 import artifact_storage, discover_artifacts, memory_order_checks
+from src.analysis.phase10 import (
+    artifact_storage,
+    discover_artifacts,
+    memory_order_checks,
+)
 from src.metrics.efficiency import measure_inference_blocks
 
 

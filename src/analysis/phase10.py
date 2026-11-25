@@ -110,10 +110,25 @@ class _ResourceMonitor:
         import psutil
 
         process = psutil.Process()
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            self._nvml = pynvml
+        except Exception:  # noqa: BLE001
+            handle = None
+            self._nvml = None
 
         def sample() -> None:
             while not self._stop.is_set():
-                gpu = _gpu_used_mb()
+                if handle is not None:
+                    try:
+                        gpu = self._nvml.nvmlDeviceGetMemoryInfo(handle).used / 1e6
+                    except Exception:  # noqa: BLE001
+                        gpu = None
+                else:
+                    gpu = _gpu_used_mb()
                 if gpu is not None:
                     self.gpu_mb.append(gpu)
                 self.rss_mb.append(process.memory_info().rss / 1e6)
@@ -127,6 +142,8 @@ class _ResourceMonitor:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2)
+        if self._nvml is not None:
+            self._nvml.nvmlShutdown()
 
 
 def _idle_power(seconds: float, sampling_hz: float = 10.0) -> float | None:
@@ -202,18 +219,33 @@ def _benchmark_fn(model, tokenizer, backend: str, prompts: list[str]):
 
     prompt = prompts[len(prompts) // 2]
     if backend == "hf":
-        from src.models.logit_extraction import (
-            answer_logits_batched,
-            encode_label_token,
-        )
+        from src.models.logit_extraction import encode_label_token
 
         hate = encode_label_token(tokenizer, " A")
         nonhate = encode_label_token(tokenizer, " B")
         lengths = [min(len(tokenizer(p, add_special_tokens=False)["input_ids"]) + 1, 256) for p in prompts]
+        ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        bos = getattr(tokenizer, "bos_token_id", None)
+        if bos is not None:
+            ids = [bos] + ids[-255:]
+        else:
+            ids = ids[-256:]
+        device = next(model.parameters()).device
+        encoded = {"input_ids": torch.tensor([ids], dtype=torch.long, device=device),
+                   "attention_mask": torch.ones((1, len(ids)), dtype=torch.long, device=device)}
+        base = getattr(model, "model", getattr(model, "transformer", None))
 
         def fn():
             with torch.inference_mode():
-                answer_logits_batched(model, tokenizer, [prompt], hate, nonhate, max_len=256)
+                if base is not None and hasattr(model, "lm_head"):
+                    hidden = base(**encoded, use_cache=False)[0]
+                    answer = model.lm_head(hidden[:, -1, :])
+                    cap = getattr(model.config, "final_logit_softcapping", None)
+                    if cap:
+                        answer = torch.tanh(answer / cap) * cap
+                else:
+                    answer = model(**encoded, use_cache=False).logits[:, -1, :]
+                answer[:, [hate, nonhate]]
 
         sync = torch.cuda.synchronize if torch.cuda.is_available() else lambda: None
         return fn, sync, lengths
@@ -246,6 +278,7 @@ def measure_artifact(root: Path, item: dict[str, Any], *, warmup: int = 10,
         "language": manifest.get("language"), "source_status": manifest.get("status"),
         "backend": "llama.cpp" if item["phase"] == "phase7" else "HF",
         **storage, "warmup": warmup, "repeats_per_block": repeats, "blocks": 2,
+        "benchmark_version": 2,
     }
     if manifest.get("status") != "success":
         row.update({"status": "source_failed", "error": manifest.get("error")})
@@ -322,7 +355,8 @@ def run_sweep(root: Path, results_dir: Path, *, warmup: int = 10, repeats: int =
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.is_file() and not force:
             row = json.loads(target.read_text(encoding="utf-8"))
-            if row.get("warmup") != warmup or row.get("repeats_per_block") != repeats:
+            if (row.get("warmup") != warmup or row.get("repeats_per_block") != repeats
+                    or row.get("benchmark_version") != 2):
                 raise ValueError(f"Benchmark protocol changed for {target}; use --force")
         else:
             row = measure_artifact(root, item, warmup=warmup, repeats=repeats, idle_seconds=idle_seconds)
