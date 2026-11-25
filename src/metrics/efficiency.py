@@ -9,6 +9,7 @@ from __future__ import annotations
 import platform
 import statistics
 import subprocess
+import threading
 import time
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -238,6 +239,85 @@ def benchmark_callable(
         "min_ms": float(arr[0]),
         "max_ms": float(arr[-1]),
         "std_ms": float(statistics.pstdev(arr)) if len(arr) > 1 else 0.0,
+    }
+
+
+def measure_inference_blocks(
+    fn,
+    *,
+    synchronize=lambda: None,
+    warmup: int = 10,
+    repeats: int = 100,
+    blocks: int = 2,
+    power_reader=read_gpu_power_w,
+    sampling_hz: float = 10.0,
+) -> dict[str, Any]:
+    """Time repeated synchronized inferences and integrate sampled board power.
+
+    Power is sampled concurrently with actual timestamps. A missing power trace
+    remains unavailable; it is never inferred from elapsed time or GPU TDP.
+    """
+    import numpy as np
+
+    if repeats < 2 or blocks < 1 or warmup < 0 or sampling_hz <= 0:
+        raise ValueError("invalid benchmark repetitions or sampling rate")
+    for _ in range(warmup):
+        fn()
+        synchronize()
+    initial_power = power_reader()
+    out = []
+    for _ in range(blocks):
+        samples: list[tuple[float, float]] = []
+        stop = threading.Event()
+
+        def sample() -> None:
+            while not stop.is_set():
+                watts = power_reader()
+                if watts is not None and np.isfinite(watts) and watts > 0:
+                    samples.append((time.perf_counter(), float(watts)))
+                stop.wait(1.0 / sampling_hz)
+
+        thread = None
+        if initial_power is not None:
+            thread = threading.Thread(target=sample, daemon=True)
+            thread.start()
+        latencies = []
+        start = time.perf_counter()
+        try:
+            for _ in range(repeats):
+                synchronize()
+                t0 = time.perf_counter()
+                fn()
+                synchronize()
+                latencies.append((time.perf_counter() - t0) * 1000.0)
+        finally:
+            stop.set()
+            if thread is not None:
+                thread.join(timeout=2)
+        elapsed = time.perf_counter() - start
+        arr = np.asarray(latencies, dtype=np.float64)
+        energy_j = None
+        if len(samples) >= 2:
+            ts = np.asarray([x[0] for x in samples])
+            pw = np.asarray([x[1] for x in samples])
+            energy_j = float(np.trapz(pw, ts))
+        out.append({
+            "latency_p50_ms": float(np.percentile(arr, 50)),
+            "latency_p95_ms": float(np.percentile(arr, 95)),
+            "latency_mean_ms": float(arr.mean()),
+            "latency_cv": float(arr.std() / arr.mean()),
+            "throughput_examples_per_sec": float(repeats / elapsed),
+            "active_duration_s": elapsed,
+            "active_energy_j": energy_j,
+            "n_power_samples": len(samples),
+        })
+    return {
+        "blocks": out,
+        "latency_p50_ms": float(np.median([b["latency_p50_ms"] for b in out])),
+        "latency_p95_ms": float(np.median([b["latency_p95_ms"] for b in out])),
+        "latency_cv_max": max(b["latency_cv"] for b in out),
+        "throughput_examples_per_sec": float(np.median([b["throughput_examples_per_sec"] for b in out])),
+        "power_available": initial_power is not None,
     }
 
 
