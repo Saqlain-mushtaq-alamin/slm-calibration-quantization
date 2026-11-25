@@ -24,7 +24,7 @@ from src.analysis.phase12 import (
 from src.models.finetune import load_tokenizer
 from src.models.logit_extraction import extract_logits_hf, probs_to_frame
 from src.models.quantize_track_a import free, load_gptq, quantize_gptq, GPTQUnavailable
-from src.utils.atomic import atomic_write_json, atomic_write_parquet
+from src.utils.atomic import atomic_write_csv, atomic_write_json, atomic_write_parquet
 from src.utils.config import config_hash, load_config
 from src.utils.logging_utils import write_run_json
 
@@ -154,14 +154,19 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
         raise ValueError(f"Unsupported ablation {ablation}")
     finally:
         if model is not None:
-            _release(model)
+            del model
+            _release(None)
 
 
-def _rebuild_results(runs_root: Path, a8: pd.DataFrame | None, results_path: Path):
+def _rebuild_results(manifests: list[Path], a8: pd.DataFrame | None, results_path: Path):
     rows = []
-    for path in sorted(runs_root.rglob("*.json")):
+    for path in manifests:
+        if not path.is_file():
+            continue
         record = json.loads(path.read_text(encoding="utf-8"))
         if record.get("status") == "success":
+            if any(not _path(row["logit_file"]).is_file() for row in record["rows"]):
+                raise FileNotFoundError(f"Successful manifest has missing logits: {path}")
             rows.extend(record["rows"])
     result = pd.DataFrame(rows)
     if a8 is not None:
@@ -171,7 +176,7 @@ def _rebuild_results(runs_root: Path, a8: pd.DataFrame | None, results_path: Pat
         if result.duplicated(key).any():
             raise ValueError("Duplicate ablation result rows")
         results_path.parent.mkdir(parents=True, exist_ok=True)
-        result.to_csv(results_path, index=False)
+        atomic_write_csv(results_path, result, index=False)
         result.to_parquet(results_path.with_suffix(".parquet"), index=False)
     return result
 
@@ -203,6 +208,7 @@ def main() -> int:
     runs_root = root / "runs/phase12"
     out_root = root / "phase12_work"
     results_path = root / "results/ablation_results.csv"
+    manifests = [_record_path(runs_root, c[0], c[4], c[5], c[6]) for c in cells]
     cache = {}
     if any(cell[0] in ("A1", "A5", "A2") for cell in cells):
         for lang in ({cell[1] for cell in cells} | ({"bn", "en"} if "A1" in ablations else set())):
@@ -213,7 +219,8 @@ def main() -> int:
         manifest_path = _record_path(runs_root, ablation, base, method, variant)
         if manifest_path.is_file() and not args.force:
             old = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if old.get("status") in ("success", "unavailable") and old.get("config_hash") == config_hash(cfg):
+            logit_files_exist = all(_path(row["logit_file"]).is_file() for row in old.get("rows", []))
+            if old.get("status") in ("success", "unavailable") and old.get("config_hash") == config_hash(cfg) and logit_files_exist:
                 print(f"skip {ablation} {base} {method} {variant}: {old['status']}")
                 continue
         start = time.perf_counter()
@@ -234,9 +241,11 @@ def main() -> int:
     if "A8" in ablations:
         a8 = temperature_source_rows(_path(cfg["paths"]["phase11_results"]),
                                      models=set(models), languages=set(languages), seeds=set(args.seeds))
-    result = _rebuild_results(runs_root, a8, results_path)
-    unavailable = [str(p) for p in runs_root.rglob("*.json") if json.loads(p.read_text(encoding="utf-8")).get("status") == "unavailable"]
-    status = "failed" if failures else ("partial" if unavailable else "success")
+        if args.smoke:
+            a8 = a8[a8["artifact"] == sorted(a8["artifact"].unique())[0]].copy()
+    result = _rebuild_results(manifests, a8, results_path)
+    unavailable = [str(p) for p in manifests if p.is_file() and json.loads(p.read_text(encoding="utf-8")).get("status") == "unavailable"]
+    status = "failed" if failures else ("smoke" if args.smoke else "partial")
     write_run_json(root / "results/phase12_run.json", phase=12, phase_name="ablation_studies",
                    status=status, payload={"n_result_rows": len(result), "n_cells": len(cells),
                                            "unavailable": unavailable, "failures": failures,
