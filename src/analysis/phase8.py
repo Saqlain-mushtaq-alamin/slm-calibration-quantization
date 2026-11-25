@@ -45,7 +45,7 @@ def _sample_fingerprint(frame: pd.DataFrame) -> str:
     return digest.hexdigest()
 
 
-def evaluate_file(path: Path, root: Path) -> dict:
+def evaluate_file(path: Path, root: Path, *, extra_eval_sets: set[str] | None = None) -> dict:
     frame = pd.read_parquet(path)
     required = {"example_id", "split", "y_true", "prob_hate", "prob_nonhate", "prediction", "precision", "seed", "language"}
     missing = required - set(frame.columns)
@@ -53,7 +53,7 @@ def evaluate_file(path: Path, root: Path) -> dict:
         raise ValueError(f"{path}: missing {sorted(missing)} or empty logits")
     phase = path.relative_to(root).parts[0]
     method, separator, eval_set = path.stem.partition("__")
-    if not separator or eval_set not in EVAL_SETS or method != _constant(frame, "precision", path):
+    if not separator or eval_set not in (EVAL_SETS | (extra_eval_sets or set())) or method != _constant(frame, "precision", path):
         raise ValueError(f"{path}: filename does not match precision/eval set")
     if _constant(frame, "split", path) != eval_set:
         raise ValueError(f"{path}: split column does not match filename")
