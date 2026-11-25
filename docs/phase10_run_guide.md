@@ -14,7 +14,9 @@ are outside the timed inference region. The same representative `id_test`
 prompt is used within a model run; token counts summarize the first 100
 `id_test` texts. Runs are sequential. `--limit 1` rehearses one artifact;
 `--force` repeats existing measurements. Individual JSON records under
-`outputs/results/phase10_runs/` make the sweep resumable.
+`outputs/results/phase10_runs/` make the sweep resumable. Each artifact runs
+in a fresh process so GPTQ and other backend CUDA allocations cannot affect
+the next artifact's memory baseline.
 
 `outputs/results/efficiency_metrics.csv` and `.parquet` hold one row per
 artifact. The `phase10_run.json` gate report records whether acceptance

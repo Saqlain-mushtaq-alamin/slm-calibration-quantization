@@ -6,6 +6,7 @@ import gc
 import json
 import statistics
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -278,7 +279,7 @@ def measure_artifact(root: Path, item: dict[str, Any], *, warmup: int = 10,
         "language": manifest.get("language"), "source_status": manifest.get("status"),
         "backend": "llama.cpp" if item["phase"] == "phase7" else "HF",
         **storage, "warmup": warmup, "repeats_per_block": repeats, "blocks": 2,
-        "benchmark_version": 3,
+        "benchmark_version": 4,
     }
     if manifest.get("status") != "success":
         row.update({"status": "source_failed", "error": manifest.get("error")})
@@ -359,11 +360,24 @@ def run_sweep(root: Path, results_dir: Path, *, warmup: int = 10, repeats: int =
         if target.is_file() and not force:
             row = json.loads(target.read_text(encoding="utf-8"))
             if (row.get("warmup") != warmup or row.get("repeats_per_block") != repeats
-                    or row.get("benchmark_version") != 3):
+                    or row.get("benchmark_version") != 4):
                 raise ValueError(f"Benchmark protocol changed for {target}; use --force")
         else:
-            row = measure_artifact(root, item, warmup=warmup, repeats=repeats, idle_seconds=idle_seconds)
-            atomic_write_json(target, row)
+            cmd = [sys.executable, "-m", "src.analysis.phase10_worker",
+                   "--root", str(root), "--manifest", str(item["manifest_path"]),
+                   "--result", str(target), "--warmup", str(warmup),
+                   "--repeats", str(repeats), "--idle-seconds", str(idle_seconds)]
+            proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", check=False)
+            if proc.returncode == 0 and target.is_file():
+                row = json.loads(target.read_text(encoding="utf-8"))
+            else:
+                row = {"phase": item["phase"], "artifact": item["artifact"],
+                       "base_run": item["manifest"].get("base_run_name") or item["artifact"],
+                       "method": item["method"], "status": "failed",
+                       "benchmark_version": 4, "warmup": warmup, "repeats_per_block": repeats,
+                       "error": (proc.stderr or proc.stdout)[-2000:] or f"Worker exit {proc.returncode}"}
+                atomic_write_json(target, row)
         rows.append(row)
         print(f"[{i}/{len(selected)}] {item['artifact']}: {row['status']}", flush=True)
     frame = pd.DataFrame(rows)
