@@ -80,3 +80,13 @@ def test_phase9_rejects_invalid_logits_before_curve_write(tmp_path):
     with pytest.raises(ValueError, match="invalid probabilities"):
         evaluate_selective_prediction(logits, curves)
     assert not list(curves.rglob("*.parquet"))
+
+
+def test_phase9_rejects_prediction_probability_disagreement(tmp_path):
+    logits = tmp_path / "logits"
+    path = _write(logits, "phase4", "base", "bf16", [.1, .9, .2, .8], [0, 1, 0, 1])
+    frame = pd.read_parquet(path)
+    frame.loc[0, "prediction"] = 1
+    frame.to_parquet(path, index=False)
+    with pytest.raises(ValueError, match="prediction disagrees"):
+        evaluate_selective_file(path, logits)

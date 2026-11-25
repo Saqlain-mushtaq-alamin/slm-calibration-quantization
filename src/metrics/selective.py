@@ -99,9 +99,7 @@ def selective_accuracy_at_coverage(y_true: Any, y_prob: Any, coverage: float) ->
         raise ValueError(f"coverage must be in (0, 1], got {coverage}")
     yt, yp, confidence, _ = _prepare(y_true, y_prob)
     n = yt.shape[0]
-    n_select = int(round(n * coverage))
-    if n_select == 0:
-        return float("nan")
+    n_select = max(1, round(n * coverage))
     top = np.argsort(-confidence, kind="stable")[:n_select]
     return float(((yp[top] >= 0.5).astype(np.int64) == yt[top]).mean())
 

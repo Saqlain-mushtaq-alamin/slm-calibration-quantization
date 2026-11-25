@@ -18,9 +18,11 @@ from src.metrics.selective import (
 def evaluate_selective_file(path: Path, logits_root: Path) -> tuple[dict, pd.DataFrame]:
     """Validate one logits file, compute metrics, and retain its full curve."""
     context = evaluate_file(path, logits_root)
-    frame = pd.read_parquet(path, columns=["y_true", "prob_hate"])
+    frame = pd.read_parquet(path, columns=["y_true", "prob_hate", "prediction"])
     y_true = frame["y_true"].to_numpy(dtype=np.int64)
     y_prob = frame["prob_hate"].to_numpy(dtype=np.float64)
+    if not np.array_equal(frame["prediction"].to_numpy(dtype=np.int64), (y_prob >= 0.5).astype(np.int64)):
+        raise ValueError(f"{path}: prediction disagrees with probability threshold")
     coverage, risk = risk_coverage_curve(y_true, y_prob)
     metrics = compute_all_selective_metrics(y_true, y_prob)
     acc = {
@@ -32,7 +34,7 @@ def evaluate_selective_file(path: Path, logits_root: Path) -> tuple[dict, pd.Dat
     metrics["selective_accuracy_monotonic_70_90"] = bool(
         acc["selective_acc_70"] >= acc["selective_acc_80"] >= acc["selective_acc_90"]
     )
-    n_errors = int(round(float(risk[-1]) * len(risk)))
+    n_errors = int(np.count_nonzero((y_prob >= 0.5) != y_true))
     metrics["failure_auroc_defined"] = bool(0 < n_errors < len(risk))
     if not metrics["failure_auroc_defined"]:
         metrics["failure_auroc"] = None
