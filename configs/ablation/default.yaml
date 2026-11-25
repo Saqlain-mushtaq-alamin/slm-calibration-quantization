@@ -1,0 +1,31 @@
+phase: 12
+seed: 42
+models: [qwen2_5_0_5b_instruct, qwen2_5_1_5b_instruct]
+languages: [bn]
+ablations: [A1, A2, A5, A8]
+calibration_samples: 512
+max_len: 256
+eval_batch_size: 8
+eval_sets: [id_test, ood_test]
+prompt_templates:
+  bn:
+    baseline: "{text}\nবাক্যটি ঘৃণামূলক কি না? উত্তর:"
+    direct: "{text}\nএই বাক্য ঘৃণামূলক? উত্তর:"
+    instruction: "নিচের বাক্যটি ঘৃণামূলক কি না শ্রেণিবদ্ধ করুন।\nবাক্য: {text}\nউত্তর:"
+  en:
+    baseline: "Classify the following text as hate speech or not.\nText: {text}\nAnswer:"
+    direct: "Is this hate speech?\n{text}\nAnswer:"
+    instruction: "Decide whether the text contains hate speech.\nText: {text}\nAnswer:"
+verbalizer: {hate: " A", nonhate: " B"}
+paths:
+  phase4_models: outputs/models/phase4
+  phase5_models: outputs/models/phase5
+  bn_data: data/processed/bd_shs_processed.csv
+  bn_splits: data/splits/bd_shs_loco_splits.json
+  en_data: data/processed/english_control_matched.csv
+  en_splits: data/splits/english_control_loco_splits.json
+  logits: outputs/logits/phase12
+  quantized: outputs/quantized/phase12
+  runs: outputs/runs/phase12
+  results: outputs/results
+  phase11_results: outputs/results/recalibration_results.parquet
