@@ -66,6 +66,18 @@ class GGUFQuantizeUnavailable(RuntimeError):
     """Neither llama-quantize binary nor llama_cpp.llama_model_quantize is available."""
 
 
+def _require_free_space(path: Path, required_bytes: int, operation: str) -> None:
+    """Fail early when the destination volume cannot hold a temporary artifact."""
+    free_bytes = shutil.disk_usage(path.parent).free
+    if free_bytes < required_bytes:
+        raise OSError(
+            f"Not enough free disk space to {operation}: "
+            f"{free_bytes / (1024 ** 3):.2f} GiB available, "
+            f"about {required_bytes / (1024 ** 3):.2f} GiB required. "
+            "Free space on the output drive and rerun without --force."
+        )
+
+
 def check_llama_gpu_support() -> bool:
     """Check if the installed llama_cpp build supports CUDA / GPU offload."""
     try:
@@ -229,6 +241,13 @@ def convert_to_gguf(
     out_p = Path(output_path).resolve()
     out_p.parent.mkdir(parents=True, exist_ok=True)
 
+    # F16 GGUF output is roughly the size of the source weight shards. Reserve
+    # extra room for metadata and filesystem variation before starting.
+    source_weight_bytes = sum(p.stat().st_size for p in model_p.rglob("*.safetensors"))
+    if source_weight_bytes:
+        reserve_bytes = max(256 * 1024**2, int(source_weight_bytes * 0.05))
+        _require_free_space(out_p, source_weight_bytes + reserve_bytes, "convert the model to GGUF")
+
     tmp_p = out_p.with_name(out_p.name + ".part")
     if tmp_p.exists():
         tmp_p.unlink()
@@ -256,6 +275,10 @@ def convert_to_gguf(
         duration = time.perf_counter() - t0
 
         if res.returncode != 0:
+            # On Windows Ctrl+C can terminate the child with this status while
+            # the parent's signal handler only records the interrupt.
+            if res.returncode in {-2, 130, 0xC000013A}:
+                raise KeyboardInterrupt("GGUF conversion interrupted by user")
             LOG.error("GGUF conversion failed (code %d):\nSTDOUT:\n%s\nSTDERR:\n%s", res.returncode, res.stdout, res.stderr)
             raise RuntimeError(
                 f"convert_hf_to_gguf.py failed with return code {res.returncode}:\n{res.stderr or res.stdout}"
@@ -312,6 +335,11 @@ def quantize_gguf(
 
     if not is_valid_gguf_file(inp_p):
         raise FileNotFoundError(f"Source GGUF file {inp_p} not found or invalid")
+
+    # Reserve space for a conservative temporary quantized output so a full
+    # drive is reported before quantization starts, rather than mid-write.
+    reserve_bytes = max(256 * 1024**2, int(inp_p.stat().st_size * 0.75))
+    _require_free_space(out_p, reserve_bytes, f"quantize {inp_p.name}")
 
     tmp_p = out_p.with_name(out_p.name + ".part")
     if tmp_p.exists():
