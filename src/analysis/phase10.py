@@ -278,14 +278,15 @@ def measure_artifact(root: Path, item: dict[str, Any], *, warmup: int = 10,
         "language": manifest.get("language"), "source_status": manifest.get("status"),
         "backend": "llama.cpp" if item["phase"] == "phase7" else "HF",
         **storage, "warmup": warmup, "repeats_per_block": repeats, "blocks": 2,
-        "benchmark_version": 2,
+        "benchmark_version": 3,
     }
     if manifest.get("status") != "success":
         row.update({"status": "source_failed", "error": manifest.get("error")})
         return row
-    model = tokenizer = None
+    model = tokenizer = fn = sync = None
     before_gpu = _gpu_used_mb()
     before_rss = psutil.Process().memory_info().rss / 1e6
+    row["gpu_memory_baseline_mb"] = before_gpu
     row["gpu_temperature_before_c"] = gpu_temperature_c()
     try:
         prompts = _sample_texts(root, item)
@@ -337,10 +338,12 @@ def measure_artifact(root: Path, item: dict[str, Any], *, warmup: int = 10,
             from src.models.quantize_track_b import free_gguf
 
             free_gguf(model)
-        model = tokenizer = None
+        fn = sync = model = tokenizer = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        row["gpu_memory_after_release_mb"] = _gpu_used_mb()
 
 
 def run_sweep(root: Path, results_dir: Path, *, warmup: int = 10, repeats: int = 100,
@@ -356,7 +359,7 @@ def run_sweep(root: Path, results_dir: Path, *, warmup: int = 10, repeats: int =
         if target.is_file() and not force:
             row = json.loads(target.read_text(encoding="utf-8"))
             if (row.get("warmup") != warmup or row.get("repeats_per_block") != repeats
-                    or row.get("benchmark_version") != 2):
+                    or row.get("benchmark_version") != 3):
                 raise ValueError(f"Benchmark protocol changed for {target}; use --force")
         else:
             row = measure_artifact(root, item, warmup=warmup, repeats=repeats, idle_seconds=idle_seconds)
