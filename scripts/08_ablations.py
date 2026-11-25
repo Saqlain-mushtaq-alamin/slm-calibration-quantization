@@ -34,6 +34,15 @@ def _path(value: str) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def _cached_model_path(model_id: str) -> str:
+    """Prefer a pinned local HF snapshot when network access is unavailable."""
+    from huggingface_hub import snapshot_download
+    try:
+        return snapshot_download(model_id, local_files_only=True)
+    except Exception:
+        return model_id
+
+
 def _release(model) -> None:
     del model
     gc.collect()
@@ -228,7 +237,7 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
             run_manifest = ROOT / "outputs/runs" / ("phase4" if language == "bn" else "phase5") / f"{base}.json"
             if not run_manifest.is_file():
                 raise FileNotFoundError(f"Missing baseline model provenance: {run_manifest}")
-            resolved = json.loads(run_manifest.read_text(encoding="utf-8"))["resolved_hf_id"]
+            resolved = _cached_model_path(json.loads(run_manifest.read_text(encoding="utf-8"))["resolved_hf_id"])
             train_cfg["model"]["hf_id"] = resolved
             entry = next(x for x in train_cfg["models"] if x["key"] == model_key)
             train_cfg["model"]["attn_implementation"] = entry.get("attn_implementation")
@@ -263,7 +272,7 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
             run_manifest = ROOT / "outputs/runs" / ("phase4" if language == "bn" else "phase5") / f"{base}.json"
             if not run_manifest.is_file():
                 raise FileNotFoundError(f"Missing baseline model provenance: {run_manifest}")
-            resolved = json.loads(run_manifest.read_text(encoding="utf-8"))["resolved_hf_id"]
+            resolved = _cached_model_path(json.loads(run_manifest.read_text(encoding="utf-8"))["resolved_hf_id"])
             train_cfg["model"]["hf_id"] = resolved
             train_cfg["train"]["quantization"] = "nf4"
             train_cfg["experiment"] = {"seed": seed, "name": f"{base}__qlora_nf4",
