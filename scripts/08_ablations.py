@@ -23,7 +23,7 @@ from src.analysis.phase12 import (
 )
 from src.models.finetune import load_tokenizer
 from src.models.logit_extraction import extract_logits_hf, probs_to_frame
-from src.models.quantize_track_a import free, load_gptq, quantize_gptq, GPTQUnavailable
+from src.models.quantize_track_a import free, load_gptq, load_quantized_hf, quantize_gptq, GPTQUnavailable
 from src.utils.atomic import atomic_write_csv, atomic_write_json, atomic_write_parquet
 from src.utils.config import config_hash, load_config
 from src.utils.logging_utils import write_run_json
@@ -54,7 +54,7 @@ def _cells(cfg, models: list[str], languages: list[str], seeds: list[int], ablat
             for seed in seeds:
                 base = f"{language}_{model}_lora_bf16_s{seed}"
                 merged = _path(cfg["paths"]["phase4_models" if language == "bn" else "phase5_models"]) / base / "merged"
-                if any(a in ablations for a in ("A1", "A2", "A4", "A5", "A6", "A7")) and not (merged / "config.json").is_file():
+                if any(a in ablations for a in ("A1", "A2", "A3", "A4", "A5", "A6", "A7")) and not (merged / "config.json").is_file():
                     raise FileNotFoundError(f"Missing merged FP checkpoint: {merged}")
                 if "A1" in ablations:
                     for variant in CALIB_VARIANTS:
@@ -75,6 +75,8 @@ def _cells(cfg, models: list[str], languages: list[str], seeds: list[int], ablat
                 if "A6" in ablations:
                     for fraction in (10, 25, 100):
                         cells.append(("A6", language, model, seed, base, "lora_bf16", f"scale_{fraction}", merged))
+                if "A3" in ablations:
+                    cells.append(("A3", language, model, seed, base, "qlora_nf4", "as_trained", merged))
     return cells
 
 
@@ -251,6 +253,36 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
                             "train_loss_decreased": trained.loss_decreased,
                             "train_wall_s": trained.wall_s})
             return rows, "success", None
+        if ablation == "A3":
+            from omegaconf import OmegaConf
+            from peft import PeftModel
+            from src.models.finetune import finetune_lora, subsample
+            baseline_path = ROOT / ("configs/baseline/default.yaml" if language == "bn"
+                                    else "configs/baseline/english_control.yaml")
+            train_cfg = OmegaConf.to_container(load_config(baseline_path), resolve=True)
+            run_manifest = ROOT / "outputs/runs" / ("phase4" if language == "bn" else "phase5") / f"{base}.json"
+            if not run_manifest.is_file():
+                raise FileNotFoundError(f"Missing baseline model provenance: {run_manifest}")
+            resolved = json.loads(run_manifest.read_text(encoding="utf-8"))["resolved_hf_id"]
+            train_cfg["model"]["hf_id"] = resolved
+            train_cfg["train"]["quantization"] = "nf4"
+            train_cfg["experiment"] = {"seed": seed, "name": f"{base}__qlora_nf4",
+                                       "output_dir": str(output_root / "models/A3" / base)}
+            train = subsample(frames["train"], min(len(frames["train"]), 160), seed=seed) if smoke else frames["train"]
+            val = frames["id_val"].head(32).copy() if smoke else frames["id_val"]
+            trained = finetune_lora(train_cfg, train, val)
+            if not trained.loss_decreased:
+                raise RuntimeError(f"A3 QLoRA training loss did not decrease for {base}")
+            model = load_quantized_hf(resolved, "bnb_nf4")
+            model = PeftModel.from_pretrained(model, trained.adapter_path)
+            tokenizer = load_tokenizer(resolved)
+            rows = _evaluate(model, tokenizer, frames, cfg=cfg, template=template,
+                             ablation=ablation, base=base, method=method, variant=variant,
+                             split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke)
+            for row in rows:
+                row.update({"n_train": len(train), "train_loss_decreased": trained.loss_decreased,
+                            "train_wall_s": trained.wall_s, "base_precision": "bnb_nf4"})
+            return rows, "success", None
         raise ValueError(f"Unsupported ablation {ablation}")
     finally:
         if model is not None:
@@ -284,7 +316,7 @@ def _rebuild_results(manifests: list[Path], a8: pd.DataFrame | None, results_pat
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "configs/ablation/default.yaml")
-    parser.add_argument("--ablations", nargs="+", choices=["A1", "A2", "A4", "A5", "A6", "A7", "A8"])
+    parser.add_argument("--ablations", nargs="+", choices=["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8"])
     parser.add_argument("--models", nargs="+")
     parser.add_argument("--languages", nargs="+", choices=["bn", "en"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[42])
@@ -318,7 +350,7 @@ def main() -> int:
     results_path = root / "results/ablation_results.csv"
     manifests = [_record_path(runs_root, c[0], c[4], c[5], c[6]) for c in cells]
     cache = {}
-    if any(cell[0] in ("A1", "A2", "A4", "A5", "A6", "A7") for cell in cells):
+    if any(cell[0] in ("A1", "A2", "A3", "A4", "A5", "A6", "A7") for cell in cells):
         for lang in ({cell[1] for cell in cells} | ({"bn", "en"} if "A1" in ablations else set())):
             cache[lang] = _frame_data(cfg, lang)
     failures = []
