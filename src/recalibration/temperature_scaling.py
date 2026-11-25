@@ -43,7 +43,7 @@ def fit_temperature(logits: np.ndarray, y_true: np.ndarray, *, bounds=(0.01, 10.
     candidates = [lo, float(result.x), hi]
     if lo <= 0 <= hi:
         candidates.append(0.0)
-    return float(np.exp(min(candidates, key=loss)))
+    return float(np.clip(np.exp(min(candidates, key=loss)), low, high))
 
 
 def apply_temperature(logits: np.ndarray, temperature: float) -> np.ndarray:
