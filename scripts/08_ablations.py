@@ -7,6 +7,7 @@ import gc
 import hashlib
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -112,6 +113,19 @@ def _stage_matches(path: Path, plan: dict) -> bool:
         return False
 
 
+def _valid_gptq_checkpoint(path: Path) -> bool:
+    return ((path / "config.json").is_file()
+            and (any(path.glob("*.safetensors")) or any(path.glob("*.bin"))))
+
+
+def _discard_incomplete_dir(path: Path, root: Path) -> None:
+    resolved, boundary = path.resolve(), root.resolve()
+    if resolved == boundary or not resolved.is_relative_to(boundary):
+        raise ValueError(f"Refusing to remove path outside Phase 12 work root: {path}")
+    if path.exists():
+        shutil.rmtree(path)
+
+
 def _saved_eval(path: Path, expected: pd.DataFrame, split: str, plan_hash: str) -> pd.DataFrame | None:
     """Reuse only an atomically written frame that still matches frozen data."""
     try:
@@ -195,7 +209,7 @@ def _evaluate(model, tokenizer, frames, *, cfg, template, ablation, base, method
     return rows
 
 
-def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
+def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool, force: bool = False):
     ablation, language, model_key, seed, base, method, variant, merged = cell
     frames, split_sha = cache[language]
     template = str(cfg["prompt_templates"][language]["baseline"])
@@ -249,14 +263,35 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
             if ablation == "A4":
                 dynamic = ({"-:.*\\.mlp\\..*": {}} if variant == "attention_only"
                            else {"-:.*\\.self_attn\\..*": {}})
-            quant_dir = output_root / "quantized" / ablation / base / variant
-            quant_info = quantize_gptq(str(merged), calib["prompts"], str(quant_dir),
-                                       bits=3 if method == "gptq_int3" else 4,
-                                       group_size=group, max_len=int(cfg["max_len"]), dynamic=dynamic)
-            model, tokenizer = load_gptq(str(quant_dir))
+            quant_plan = {"config_hash": config_hash(cfg), "ablation": ablation,
+                          "artifact": base, "method": method, "variant": variant,
+                          "source": str(merged), "calibration_hash": _hash(calib),
+                          "bits": 3 if method == "gptq_int3" else 4,
+                          "group_size": group, "dynamic": dynamic, "smoke": smoke}
+            quant_dir = output_root / "quantized" / ablation / base / variant / _hash(quant_plan)[:16]
+            marker = quant_dir / ".phase12_quant.json"
+            quant_info = None
+            if not force and marker.is_file():
+                try:
+                    saved = json.loads(marker.read_text(encoding="utf-8"))
+                    if saved.get("plan") == quant_plan and _valid_gptq_checkpoint(quant_dir):
+                        model, tokenizer = load_gptq(str(quant_dir))
+                        quant_info = saved["quant_info"]
+                        print(f"reuse quantized model: {quant_dir}")
+                except (OSError, ValueError, KeyError, RuntimeError):
+                    quant_info = None
+            if quant_info is None:
+                _discard_incomplete_dir(quant_dir, output_root)
+                quant_info = quantize_gptq(str(merged), calib["prompts"], str(quant_dir),
+                                           bits=quant_plan["bits"], group_size=group,
+                                           max_len=int(cfg["max_len"]), dynamic=dynamic)
+                if not _valid_gptq_checkpoint(quant_dir):
+                    raise RuntimeError(f"GPTQ save incomplete: {quant_dir}")
+                atomic_write_json(marker, {"plan": quant_plan, "quant_info": quant_info})
+                model, tokenizer = load_gptq(str(quant_dir))
             rows = _evaluate(model, tokenizer, frames, cfg=cfg, template=template,
                              ablation=ablation, base=base, method=method, variant=variant,
-                             split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke)
+                             split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke, force=force)
             for row in rows:
                 row.update({"calibration_source": variant if ablation == "A1" else language,
                             "calibration_n": len(calib["prompts"]), "calibration_ids_sha256":
@@ -271,8 +306,16 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
             source = ROOT / "outputs/quantized/track_b" / f"{base}__f16.gguf"
             if not is_valid_gguf_file(source):
                 raise FileNotFoundError(f"A7 requires Phase 7 F16 GGUF: {source}")
-            target = output_root / "quantized/A7" / base / "q2_k.gguf"
-            info = quantize_gguf(source, target, "q2_k")
+            quant_plan = {"config_hash": config_hash(cfg), "ablation": "A7",
+                          "artifact": base, "source": str(source), "method": "q2_k", "smoke": smoke}
+            target = output_root / "quantized/A7" / base / _hash(quant_plan)[:16] / "q2_k.gguf"
+            marker = target.with_suffix(".phase12_quant.json")
+            if not force and is_valid_gguf_file(target) and _stage_matches(marker, quant_plan):
+                info = {"quantize_s": 0.0, "reused": True}
+                print(f"reuse quantized GGUF: {target}")
+            else:
+                info = quantize_gguf(source, target, "q2_k")
+                atomic_write_json(marker, quant_plan)
             llm = load_gguf_model(target, n_ctx=512, n_gpu_layers=-1, verbose=False, logits_all=True)
             try:
                 tokenizer = load_tokenizer(str(merged))
@@ -331,7 +374,7 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
                 return rows, "success", None
             rows = _evaluate(model, tokenizer, frames, cfg=cfg, template=template,
                              ablation=ablation, base=base, method=method, variant=variant,
-                             split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke)
+                             split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke, force=force)
             return rows, "success", None
         if ablation == "A6":
             from omegaconf import OmegaConf
@@ -379,7 +422,7 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
             tokenizer = load_tokenizer(trained.merged_path)
             rows = _evaluate(model, tokenizer, frames, cfg=cfg, template=template,
                              ablation=ablation, base=base, method=method, variant=variant,
-                             split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke)
+                             split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke, force=force)
             for row in rows:
                 row.update({"train_fraction": fraction / 100, "n_train": len(selected),
                             "train_loss_decreased": trained.loss_decreased,
@@ -410,7 +453,7 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
             tokenizer = load_tokenizer(resolved)
             rows = _evaluate(model, tokenizer, frames, cfg=cfg, template=template,
                              ablation=ablation, base=base, method=method, variant=variant,
-                             split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke)
+                             split_sha=split_sha, logits_root=output_root / "logits", smoke=smoke, force=force)
             for row in rows:
                 row.update({"n_train": len(train), "train_loss_decreased": trained.loss_decreased,
                             "train_wall_s": trained.wall_s, "base_precision": "bnb_nf4"})
@@ -503,7 +546,8 @@ def main() -> int:
                 continue
         start = time.perf_counter()
         try:
-            rows, status, reason = _run_cell(cell, cfg, cache=cache, output_root=out_root, smoke=args.smoke)
+            rows, status, reason = _run_cell(cell, cfg, cache=cache, output_root=out_root,
+                                              smoke=args.smoke, force=args.force)
         except (GPTQUnavailable, ImportError, NotImplementedError) as exc:
             rows, status, reason = [], "unavailable", f"{type(exc).__name__}: {exc}"
         except Exception as exc:
