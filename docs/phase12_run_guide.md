@@ -1,7 +1,7 @@
 # Phase 12: Ablation studies
 
 The runner implements A1–A8 for the two Bengali headline models at seed 42
-by default. It saves one Parquet logit file per new evaluation, one JSON
+by default (48 cells plus A8). It saves one Parquet logit file per new evaluation, one JSON
 manifest per cell, `outputs/results/ablation_results.csv` and `.parquet`, and
 `outputs/results/phase12_run.json`. It checks frozen evaluation IDs and labels,
 finite logits, probability normalization, and training-only calibration IDs.
@@ -57,7 +57,7 @@ take ~0.5–2 hours. The 160-example QLoRA smoke run took about 31 seconds of
 training, suggesting ~2–4 hours for two full A3 trainings. A6's 10% and 25%
 LoRA runs may take ~1–3 hours. GGUF Q2_K conversion and inference may add
 ~0.5–1.5 hours. A8 is seconds. **Allow roughly 5–13 GPU hours** overall,
-plus space for approximately 18 new quantized checkpoints. This is an
+plus space for approximately 20 new quantized checkpoints. This is an
 extrapolation, not a Phase 12 full-run measurement; each manifest records its
 actual `wall_s`.
 

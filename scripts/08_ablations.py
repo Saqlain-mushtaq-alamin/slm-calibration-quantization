@@ -177,7 +177,7 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
             return rows, "success", None
         if ablation in ("A1", "A4", "A5", "A7") and method != "gguf_q2_k":
             if method == "awq_int4":
-                return [], "unavailable", "AWQ driver is absent in the current Track A stack"
+                return [], "unavailable", "AWQ quantization driver is not implemented in the Track A stack"
             if ablation == "A1":
                 bn, _ = cache["bn"]
                 en, _ = cache["en"]
@@ -397,7 +397,7 @@ def _rebuild_results(manifests: list[Path], a8: pd.DataFrame | None, results_pat
             raise ValueError("Duplicate ablation result rows")
         results_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_csv(results_path, result, index=False)
-        result.to_parquet(results_path.with_suffix(".parquet"), index=False)
+        atomic_write_parquet(results_path.with_suffix(".parquet"), result)
     return result
 
 
