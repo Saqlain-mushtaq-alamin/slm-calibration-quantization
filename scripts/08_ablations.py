@@ -140,6 +140,28 @@ def _saved_eval(path: Path, expected: pd.DataFrame, split: str, plan_hash: str) 
         return None
 
 
+def _complete_manifest_valid(record: dict, cfg, frames: dict, *, smoke: bool) -> bool:
+    if record.get("status") != "success" or record.get("config_hash") != config_hash(cfg):
+        return False
+    rows = record.get("rows", [])
+    if len(rows) != len(cfg["eval_sets"]):
+        return False
+    for row in rows:
+        split = row.get("eval_set")
+        if split not in cfg["eval_sets"]:
+            return False
+        expected = frames[split].head(16).copy() if smoke else frames[split]
+        path = _path(row["logit_file"])
+        try:
+            frame = pd.read_parquet(path)
+            if smoke and len(frame) > len(expected):
+                frame = frame.head(len(expected)).copy()
+            validate_ablation_logits(frame, expected)
+        except (OSError, ValueError, KeyError, ImportError):
+            return False
+    return True
+
+
 def _hidden_features(model, tokenizer, frame: pd.DataFrame, template: str, max_len: int) -> np.ndarray:
     """Last real-token hidden state for a frozen, unmodified causal backbone."""
     model.eval()
@@ -540,8 +562,9 @@ def main() -> int:
         manifest_path = _record_path(runs_root, ablation, base, method, variant)
         if manifest_path.is_file() and not args.force:
             old = json.loads(manifest_path.read_text(encoding="utf-8"))
-            logit_files_exist = all(_path(row["logit_file"]).is_file() for row in old.get("rows", []))
-            if old.get("status") in ("success", "unavailable") and old.get("config_hash") == config_hash(cfg) and logit_files_exist:
+            valid = (old.get("status") == "unavailable" and old.get("config_hash") == config_hash(cfg))
+            valid = valid or _complete_manifest_valid(old, cfg, cache[language][0], smoke=args.smoke)
+            if valid:
                 print(f"skip {ablation} {base} {method} {variant}: {old['status']}")
                 continue
         start = time.perf_counter()
