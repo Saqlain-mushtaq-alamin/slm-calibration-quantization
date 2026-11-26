@@ -441,6 +441,12 @@ def main() -> int:
     if any(cell[0] in ("A1", "A2", "A3", "A4", "A5", "A6", "A7") for cell in cells):
         for lang in ({cell[1] for cell in cells} | ({"bn", "en"} if "A1" in ablations else set())):
             cache[lang] = _frame_data(cfg, lang)
+    a8 = None
+    if "A8" in ablations:
+        a8 = temperature_source_rows(_path(cfg["paths"]["phase11_results"]),
+                                     models=set(models), languages=set(languages), seeds=set(args.seeds))
+        if args.smoke:
+            a8 = a8[a8["artifact"] == sorted(a8["artifact"].unique())[0]].copy()
     failures = []
     for cell in cells:
         ablation, language, model_key, seed, base, method, variant, merged = cell
@@ -465,12 +471,6 @@ def main() -> int:
                                          "reason": reason, "rows": rows, "config_hash": config_hash(cfg),
                                          "wall_s": round(time.perf_counter() - start, 2)})
         print(f"{status} {ablation} {base} {method} {variant}: {reason or len(rows)}")
-    a8 = None
-    if "A8" in ablations:
-        a8 = temperature_source_rows(_path(cfg["paths"]["phase11_results"]),
-                                     models=set(models), languages=set(languages), seeds=set(args.seeds))
-        if args.smoke:
-            a8 = a8[a8["artifact"] == sorted(a8["artifact"].unique())[0]].copy()
     result = _rebuild_results(manifests, a8, results_path)
     unavailable = [str(p) for p in manifests if p.is_file() and json.loads(p.read_text(encoding="utf-8")).get("status") == "unavailable"]
     status = "failed" if failures else ("smoke" if args.smoke else "partial")

@@ -2,7 +2,7 @@ phase: 12
 seed: 42
 models: [qwen2_5_0_5b_instruct, qwen2_5_1_5b_instruct]
 languages: [bn]
-ablations: [A1, A2, A5, A8]
+ablations: [A1, A2, A3, A4, A5, A6, A7, A8]
 calibration_samples: 512
 max_len: 256
 eval_batch_size: 8
