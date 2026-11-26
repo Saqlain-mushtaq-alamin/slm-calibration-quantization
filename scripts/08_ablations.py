@@ -11,6 +11,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -160,6 +161,43 @@ def _complete_manifest_valid(record: dict, cfg, frames: dict, *, smoke: bool) ->
         except (OSError, ValueError, KeyError, ImportError):
             return False
     return True
+
+
+def _train_or_resume(train_cfg: dict, train: pd.DataFrame, val: pd.DataFrame,
+                     output_dir: Path, work_root: Path, *, qlora: bool, force: bool):
+    """Resume a complete adapter or the latest valid Trainer checkpoint."""
+    from src.models.finetune import finetune_lora
+
+    train_cfg["train"]["save_strategy"] = "steps"
+    train_cfg["train"]["save_steps"] = 10
+    train_cfg["train"]["save_total_limit"] = 2
+    plan = {"recipe_hash": _hash({"model": train_cfg["model"], "train": train_cfg["train"],
+                                    "data": train_cfg["data"], "seed": train_cfg["experiment"]["seed"]}),
+            "train_hash": _hash(train[["example_id", "label"]].astype(str).values.tolist()),
+            "val_hash": _hash(val[["example_id", "label"]].astype(str).values.tolist()),
+            "qlora": qlora}
+    marker = output_dir / ".phase12_train_plan.json"
+    if output_dir.exists() and not _stage_matches(marker, plan):
+        if not force:
+            raise RuntimeError(f"Training directory has no matching resume plan: {output_dir}; use --force to replace it")
+        _discard_incomplete_dir(output_dir, work_root)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(marker, plan)
+    train_cfg["experiment"]["output_dir"] = str(output_dir)
+    adapter = output_dir / "adapter"
+    merged = output_dir / "merged"
+    metrics_file = output_dir / "train_metrics.json"
+    if not force and metrics_file.is_file() and is_valid_adapter(adapter) and (qlora or is_valid_merged(merged)):
+        metrics = json.loads(metrics_file.read_text(encoding="utf-8"))
+        if metrics.get("n_train") == len(train) and metrics.get("n_id_val") == len(val):
+            losses = [x["loss"] for x in metrics.get("log_history", []) if "loss" in x]
+            print(f"reuse completed training: {output_dir}")
+            return SimpleNamespace(adapter_path=str(adapter), merged_path="" if qlora else str(merged),
+                                   loss_decreased=len(losses) >= 2 and losses[-1] < losses[0],
+                                   wall_s=metrics.get("wall_s"))
+    # finetune_lora finds the latest valid checkpoint, skipping a checkpoint
+    # left half-written by a sudden power cut.
+    return finetune_lora(train_cfg, train, val)
 
 
 def _hidden_features(model, tokenizer, frame: pd.DataFrame, template: str, max_len: int) -> np.ndarray:
@@ -400,7 +438,7 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool, force: bool =
             return rows, "success", None
         if ablation == "A6":
             from omegaconf import OmegaConf
-            from src.models.finetune import finetune_lora, load_base_model
+            from src.models.finetune import load_base_model
             fraction = int(variant.removeprefix("scale_"))
             if fraction == 100 and not smoke:
                 rows = []
@@ -437,7 +475,9 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool, force: bool =
             n_train = max(2, round(len(base_train) * fraction / 100))
             selected = subsample(base_train, n_train, seed=seed)
             val = frames["id_val"].head(32).copy() if smoke else frames["id_val"]
-            trained = finetune_lora(train_cfg, selected, val)
+            trained = _train_or_resume(train_cfg, selected, val,
+                                       output_root / "models/A6" / base / variant,
+                                       output_root, qlora=False, force=force)
             if not trained.loss_decreased:
                 raise RuntimeError(f"A6 training loss did not decrease for {base}/{variant}")
             model = load_base_model(trained.merged_path)
@@ -453,7 +493,6 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool, force: bool =
         if ablation == "A3":
             from omegaconf import OmegaConf
             from peft import PeftModel
-            from src.models.finetune import finetune_lora
             baseline_path = ROOT / ("configs/baseline/default.yaml" if language == "bn"
                                     else "configs/baseline/english_control.yaml")
             train_cfg = OmegaConf.to_container(load_config(baseline_path), resolve=True)
@@ -467,7 +506,9 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool, force: bool =
                                        "output_dir": str(output_root / "models/A3" / base)}
             train = subsample(frames["train"], min(len(frames["train"]), 160), seed=seed) if smoke else frames["train"]
             val = frames["id_val"].head(32).copy() if smoke else frames["id_val"]
-            trained = finetune_lora(train_cfg, train, val)
+            trained = _train_or_resume(train_cfg, train, val,
+                                       output_root / "models/A3" / base,
+                                       output_root, qlora=True, force=force)
             if not trained.loss_decreased:
                 raise RuntimeError(f"A3 QLoRA training loss did not decrease for {base}")
             model = load_quantized_hf(resolved, "bnb_nf4")
