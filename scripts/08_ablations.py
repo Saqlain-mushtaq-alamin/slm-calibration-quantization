@@ -77,6 +77,7 @@ def _cells(cfg, models: list[str], languages: list[str], seeds: list[int], ablat
                     for group in (128, 32):
                         cells.append(("A5", language, model, seed, base, "gptq_int4", f"group_{group}", merged))
                 if "A4" in ablations:
+                    cells.append(("A4", language, model, seed, base, "gptq_int4", "full", merged))
                     for variant in ("attention_only", "mlp_only"):
                         cells.append(("A4", language, model, seed, base, "gptq_int4", variant, merged))
                 if "A7" in ablations:
@@ -86,6 +87,7 @@ def _cells(cfg, models: list[str], languages: list[str], seeds: list[int], ablat
                     for fraction in (10, 25, 100):
                         cells.append(("A6", language, model, seed, base, "lora_bf16", f"scale_{fraction}", merged))
                 if "A3" in ablations:
+                    cells.append(("A3", language, model, seed, base, "lora_then_ptq", "bnb_nf4", merged))
                     cells.append(("A3", language, model, seed, base, "qlora_nf4", "as_trained", merged))
     return cells
 
@@ -155,6 +157,24 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
     template = str(cfg["prompt_templates"][language]["baseline"])
     model = None
     try:
+        if (ablation == "A3" and method == "lora_then_ptq") or (ablation == "A4" and variant == "full"):
+            source_method = "bnb_nf4" if ablation == "A3" else "gptq_int4"
+            rows = []
+            for split in cfg["eval_sets"]:
+                path = ROOT / "outputs/logits/phase6" / f"{base}__{source_method}" / f"{source_method}__{split}.parquet"
+                if not path.is_file():
+                    raise FileNotFoundError(f"Missing comparator logits: {path}")
+                expected = frames[str(split)]
+                original = pd.read_parquet(path)
+                validate_ablation_logits(original, expected)
+                if smoke:
+                    original = original.head(16).copy()
+                rows.append(metric_row(original, ablation_id=ablation, artifact=base,
+                                       language=language, model=model_key, seed=seed,
+                                       method=method, variant=variant, eval_set=str(split),
+                                       split_sha256=split_sha, logit_file=str(path.relative_to(ROOT)),
+                                       source="phase6_saved_logits", status="success"))
+            return rows, "success", None
         if ablation in ("A1", "A4", "A5", "A7") and method != "gguf_q2_k":
             if method == "awq_int4":
                 return [], "unavailable", "AWQ driver is absent in the current Track A stack"
@@ -304,7 +324,7 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool):
                                        "output_dir": str(output_root / "models/A6" / base / variant)}
             base_train = frames["train"]
             if smoke:
-                base_train = subsample(base_train, min(len(base_train), 160), seed=seed)
+                base_train = subsample(base_train, min(len(base_train), 640), seed=seed)
             n_train = max(2, round(len(base_train) * fraction / 100))
             selected = subsample(base_train, n_train, seed=seed)
             val = frames["id_val"].head(32).copy() if smoke else frames["id_val"]
