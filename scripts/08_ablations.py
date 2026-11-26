@@ -464,14 +464,35 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool, force: bool =
                 from sklearn.linear_model import LogisticRegression
                 n_probe = 32 if smoke else 2048
                 train = subsample(frames["train"], min(len(frames["train"]), n_probe), seed=seed)
-                features = _hidden_features(model, tokenizer, train, template, int(cfg["max_len"]))
-                head = LogisticRegression(max_iter=300, random_state=seed)
-                head.fit(features, train["label"].to_numpy(dtype=int))
                 head_path = output_root / "heads/A2" / base / "linear_head.npz"
                 head_path.parent.mkdir(parents=True, exist_ok=True)
-                np.savez(head_path, coef=head.coef_, intercept=head.intercept_, classes=head.classes_)
+                head_plan = {"config_hash": config_hash(cfg), "artifact": base, "seed": seed,
+                             "template": template, "train_hash": _hash(train[["example_id", "label"]].astype(str).values.tolist()),
+                             "smoke": smoke}
+                head_marker = head_path.with_suffix(".plan.json")
+                head = None
+                if not force and _stage_matches(head_marker, head_plan) and head_path.is_file():
+                    try:
+                        with np.load(head_path, allow_pickle=False) as saved:
+                            coef, intercept, classes = saved["coef"], saved["intercept"], saved["classes"]
+                        if coef.ndim == 2 and coef.shape[0] == 1 and intercept.shape == (1,) and np.array_equal(classes, [0, 1]) and np.isfinite(coef).all():
+                            head = SimpleNamespace(decision_function=lambda x: (x @ coef.T + intercept).ravel())
+                            print(f"reuse trained linear head: {head_path}")
+                    except (OSError, ValueError, KeyError):
+                        pass
+                if head is None:
+                    features = _hidden_features(model, tokenizer, train, template, int(cfg["max_len"]),
+                                                cache_dir=output_root / "features/A2" / base / "train")
+                    head = LogisticRegression(max_iter=300, random_state=seed)
+                    head.fit(features, train["label"].to_numpy(dtype=int))
+                    tmp = head_path.with_name(head_path.name + f".{os.getpid()}.part")
+                    with open(tmp, "wb") as file:
+                        np.savez(file, coef=head.coef_, intercept=head.intercept_, classes=head.classes_)
+                    os.replace(tmp, head_path)
+                    atomic_write_json(head_marker, head_plan)
                 def make_frame(split, expected):
-                    values = _hidden_features(model, tokenizer, expected, template, int(cfg["max_len"]))
+                    values = _hidden_features(model, tokenizer, expected, template, int(cfg["max_len"]),
+                                              cache_dir=output_root / "features/A2" / base / split)
                     margin = head.decision_function(values)
                     return probs_to_frame(expected["example_id"].astype(str), split,
                                           expected["label"], margin, np.zeros(len(margin)))
