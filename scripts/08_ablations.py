@@ -270,6 +270,39 @@ def _evaluate(model, tokenizer, frames, *, cfg, template, ablation, base, method
     return rows
 
 
+def _evaluate_custom(frames, *, cfg, template, ablation, language, model_key, seed,
+                     base, method, variant, split_sha, logits_root: Path, smoke: bool,
+                     make_frame, force: bool = False, extra: dict | None = None):
+    eval_dir = logits_root / ablation / base / method / variant
+    plan = {"config_hash": config_hash(cfg), "ablation": ablation, "artifact": base,
+            "method": method, "variant": variant, "split_sha256": split_sha,
+            "template": template, "smoke": smoke}
+    marker = eval_dir / ".eval_plan.json"
+    resume = not force and _stage_matches(marker, plan)
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    if not resume:
+        atomic_write_json(marker, plan)
+    plan_hash = _hash(plan)
+    rows = []
+    for split in cfg["eval_sets"]:
+        expected = frames[str(split)].head(16).copy() if smoke else frames[str(split)]
+        path = eval_dir / f"{split}.parquet"
+        frame = _saved_eval(path, expected, str(split), plan_hash) if resume else None
+        if frame is None:
+            frame = make_frame(str(split), expected)
+            validate_ablation_logits(frame, expected)
+            frame["phase12_eval_plan_hash"] = plan_hash
+            atomic_write_parquet(path, frame)
+        else:
+            print(f"reuse evaluated split: {path}")
+        rows.append(metric_row(frame, ablation_id=ablation, artifact=base,
+                               language=language, model=model_key, seed=seed,
+                               method=method, variant=variant, eval_set=str(split),
+                               split_sha256=split_sha, logit_file=str(path.relative_to(ROOT)),
+                               status="success", **(extra or {})))
+    return rows
+
+
 def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool, force: bool = False):
     ablation, language, model_key, seed, base, method, variant, merged = cell
     frames, split_sha = cache[language]
