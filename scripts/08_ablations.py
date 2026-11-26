@@ -413,23 +413,18 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool, force: bool =
             llm = load_gguf_model(target, n_ctx=512, n_gpu_layers=-1, verbose=False, logits_all=True)
             try:
                 tokenizer = load_tokenizer(str(merged))
-                rows = []
-                for split in cfg["eval_sets"]:
-                    expected = frames[str(split)].head(16).copy() if smoke else frames[str(split)]
-                    logit_frame = extract_logits_llamacpp(
+                def make_frame(split, expected):
+                    return extract_logits_llamacpp(
                         llm, expected, verbalizer=dict(cfg["verbalizer"]),
-                        split=str(split), max_len=int(cfg["max_len"]),
+                        split=split, max_len=int(cfg["max_len"]),
                         template=template, model_id=base, tokenizer=tokenizer,
                     )
-                    validate_ablation_logits(logit_frame, expected)
-                    path = output_root / "logits/A7" / base / method / variant / f"{split}.parquet"
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    atomic_write_parquet(path, logit_frame)
-                    rows.append(metric_row(logit_frame, ablation_id="A7", artifact=base,
-                                           language=language, model=model_key, seed=seed,
-                                           method=method, variant=variant, eval_set=str(split),
-                                           split_sha256=split_sha, logit_file=str(path.relative_to(ROOT)),
-                                           quantize_s=info["quantize_s"], status="success"))
+                rows = _evaluate_custom(frames, cfg=cfg, template=template, ablation="A7",
+                                        language=language, model_key=model_key, seed=seed,
+                                        base=base, method=method, variant=variant, split_sha=split_sha,
+                                        logits_root=output_root / "logits", smoke=smoke,
+                                        make_frame=make_frame, force=force,
+                                        extra={"quantize_s": info["quantize_s"]})
                 return rows, "success", None
             finally:
                 free_gguf(llm)
@@ -448,23 +443,18 @@ def _run_cell(cell, cfg, *, cache, output_root: Path, smoke: bool, force: bool =
                 head_path = output_root / "heads/A2" / base / "linear_head.npz"
                 head_path.parent.mkdir(parents=True, exist_ok=True)
                 np.savez(head_path, coef=head.coef_, intercept=head.intercept_, classes=head.classes_)
-                rows = []
-                for split in cfg["eval_sets"]:
-                    expected = frames[str(split)].head(16).copy() if smoke else frames[str(split)]
+                def make_frame(split, expected):
                     values = _hidden_features(model, tokenizer, expected, template, int(cfg["max_len"]))
                     margin = head.decision_function(values)
-                    logit_frame = probs_to_frame(expected["example_id"].astype(str), str(split),
-                                                 expected["label"], margin, np.zeros(len(margin)))
-                    validate_ablation_logits(logit_frame, expected)
-                    path = output_root / "logits/A2" / base / method / variant / f"{split}.parquet"
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    atomic_write_parquet(path, logit_frame)
-                    rows.append(metric_row(logit_frame, ablation_id="A2", artifact=base,
-                                           language=language, model=model_key, seed=seed,
-                                           method=method, variant=variant, eval_set=str(split),
-                                           split_sha256=split_sha, logit_file=str(path.relative_to(ROOT)),
-                                           n_head_train=len(train), head_file=str(head_path.relative_to(ROOT)),
-                                           status="success"))
+                    return probs_to_frame(expected["example_id"].astype(str), split,
+                                          expected["label"], margin, np.zeros(len(margin)))
+                rows = _evaluate_custom(frames, cfg=cfg, template=template, ablation="A2",
+                                        language=language, model_key=model_key, seed=seed,
+                                        base=base, method=method, variant=variant, split_sha=split_sha,
+                                        logits_root=output_root / "logits", smoke=smoke,
+                                        make_frame=make_frame, force=force,
+                                        extra={"n_head_train": len(train),
+                                               "head_file": str(head_path.relative_to(ROOT))})
                 return rows, "success", None
             rows = _evaluate(model, tokenizer, frames, cfg=cfg, template=template,
                              ablation=ablation, base=base, method=method, variant=variant,
