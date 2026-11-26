@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -24,7 +26,10 @@ from src.analysis.phase12 import (
 from src.models.finetune import build_prompt, load_tokenizer, subsample
 from src.models.logit_extraction import extract_logits_hf, probs_to_frame
 from src.models.quantize_track_a import free, load_gptq, load_quantized_hf, quantize_gptq, GPTQUnavailable
-from src.utils.atomic import atomic_write_csv, atomic_write_json, atomic_write_parquet
+from src.utils.atomic import (
+    atomic_write_csv, atomic_write_json, atomic_write_parquet,
+    is_valid_adapter, is_valid_merged,
+)
 from src.utils.config import config_hash, load_config
 from src.utils.logging_utils import write_run_json
 
@@ -96,6 +101,31 @@ def _record_path(out_root: Path, ablation: str, base: str, method: str, variant:
     return out_root / ablation / base / f"{method}__{variant}.json"
 
 
+def _hash(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _stage_matches(path: Path, plan: dict) -> bool:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) == plan
+    except (OSError, ValueError):
+        return False
+
+
+def _saved_eval(path: Path, expected: pd.DataFrame, split: str, plan_hash: str) -> pd.DataFrame | None:
+    """Reuse only an atomically written frame that still matches frozen data."""
+    try:
+        frame = pd.read_parquet(path)
+        if ("split" not in frame or not (frame["split"] == split).all()
+                or "phase12_eval_plan_hash" not in frame
+                or not (frame["phase12_eval_plan_hash"] == plan_hash).all()):
+            return None
+        validate_ablation_logits(frame, expected)
+        return frame
+    except (OSError, ValueError, KeyError, ImportError):
+        return None
+
+
 def _hidden_features(model, tokenizer, frame: pd.DataFrame, template: str, max_len: int) -> np.ndarray:
     """Last real-token hidden state for a frozen, unmodified causal backbone."""
     model.eval()
@@ -127,21 +157,35 @@ def _hidden_features(model, tokenizer, frame: pd.DataFrame, template: str, max_l
 
 
 def _evaluate(model, tokenizer, frames, *, cfg, template, ablation, base, method, variant, split_sha,
-              logits_root: Path, smoke: bool):
+              logits_root: Path, smoke: bool, force: bool = False):
     rows = []
+    eval_dir = logits_root / ablation / base / method / variant
+    plan = {"config_hash": config_hash(cfg), "ablation": ablation, "artifact": base,
+            "method": method, "variant": variant, "split_sha256": split_sha,
+            "template": template, "smoke": smoke}
+    plan_path = eval_dir / ".eval_plan.json"
+    plan_hash = _hash(plan)
+    resume = not force and _stage_matches(plan_path, plan)
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    if not resume:
+        atomic_write_json(plan_path, plan)
     for split in cfg["eval_sets"]:
         expected = frames[str(split)]
         if smoke:
             expected = expected.head(16).copy()
-        logit_frame = extract_logits_hf(
-            model, tokenizer, expected, verbalizer=dict(cfg["verbalizer"]),
-            batch_size=int(cfg["eval_batch_size"]), split=str(split),
-            max_len=int(cfg["max_len"]), template=template, model_id=base,
-        )
-        validate_ablation_logits(logit_frame, expected)
-        path = logits_root / ablation / base / method / variant / f"{split}.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_parquet(path, logit_frame)
+        path = eval_dir / f"{split}.parquet"
+        logit_frame = _saved_eval(path, expected, str(split), plan_hash) if resume else None
+        if logit_frame is None:
+            logit_frame = extract_logits_hf(
+                model, tokenizer, expected, verbalizer=dict(cfg["verbalizer"]),
+                batch_size=int(cfg["eval_batch_size"]), split=str(split),
+                max_len=int(cfg["max_len"]), template=template, model_id=base,
+            )
+            validate_ablation_logits(logit_frame, expected)
+            logit_frame["phase12_eval_plan_hash"] = plan_hash
+            atomic_write_parquet(path, logit_frame)
+        else:
+            print(f"reuse evaluated split: {path}")
         rows.append(metric_row(logit_frame, ablation_id=ablation, artifact=base,
                                language=base[:2], model=base[3:].rsplit("_lora_bf16_s", 1)[0],
                                seed=int(base.rsplit("_s", 1)[1]), method=method,
