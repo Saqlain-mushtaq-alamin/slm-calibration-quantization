@@ -177,10 +177,11 @@ def _train_or_resume(train_cfg: dict, train: pd.DataFrame, val: pd.DataFrame,
             "val_hash": _hash(val[["example_id", "label"]].astype(str).values.tolist()),
             "qlora": qlora}
     marker = output_dir / ".phase12_train_plan.json"
-    if output_dir.exists() and not _stage_matches(marker, plan):
-        if not force:
+    if output_dir.exists():
+        if force:
+            _discard_incomplete_dir(output_dir, work_root)
+        elif not _stage_matches(marker, plan):
             raise RuntimeError(f"Training directory has no matching resume plan: {output_dir}; use --force to replace it")
-        _discard_incomplete_dir(output_dir, work_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(marker, plan)
     train_cfg["experiment"]["output_dir"] = str(output_dir)
