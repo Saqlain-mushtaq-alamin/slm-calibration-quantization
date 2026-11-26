@@ -29,10 +29,32 @@ The final command starts the **full A1–A8 sweep**. It was not run during
 implementation. `--smoke` uses eight GPTQ calibration prompts, up to 16
 examples per test set, and an isolated `outputs/phase12_smoke/` root. Use
 `--ablations`, `--models`, `--languages`, `--seeds`, `--variants`, and
-`--methods` to run targeted cells. The runner resumes successful cells when
-their config hash and saved logit files match; `--force` recomputes them.
+`--methods` to run targeted cells.
 Set `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` when network access is
 unavailable and the original HF model snapshots are cached locally.
+
+## Stop and restart safely
+
+If the PC shuts down, power fails, or you stop the process, **run the exact
+same command again without `--force`**. The runner verifies saved manifests
+and logits and skips completed cells. Within an interrupted cell it also
+reuses a verified GPTQ/GGUF checkpoint, a completed QLoRA/LoRA training run,
+and each valid evaluation split. A2's linear-head feature extraction is saved
+in 128-example blocks, and its fitted head is reused. Writes are atomic, and
+incomplete checkpoints or corrupt Parquet files are recomputed.
+
+For A3 and A6, Trainer saves a checkpoint every 10 optimizer updates and
+retains the latest two. A sudden shutdown can lose work since the last
+checkpoint, but it will not restart the entire training cell. GPTQModel does
+not expose a checkpoint inside its quantization call: a shutdown **during**
+that call repeats only the current quantization cell. Quantizations and
+evaluation splits already completed in earlier cells remain saved.
+
+Do not change the config, selected options, source data, or command between
+restarts. `--force` explicitly recomputes selected cells and removes their
+previous training checkpoint directories. Keep `outputs/` intact; deleting
+it removes the resume artifacts. Cell manifests under `outputs/runs/phase12/`
+show what has completed, failed, or is unavailable.
 
 ## Methods and provenance
 

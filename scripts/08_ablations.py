@@ -189,13 +189,16 @@ def _train_or_resume(train_cfg: dict, train: pd.DataFrame, val: pd.DataFrame,
     merged = output_dir / "merged"
     metrics_file = output_dir / "train_metrics.json"
     if not force and metrics_file.is_file() and is_valid_adapter(adapter) and (qlora or is_valid_merged(merged)):
-        metrics = json.loads(metrics_file.read_text(encoding="utf-8"))
-        if metrics.get("n_train") == len(train) and metrics.get("n_id_val") == len(val):
-            losses = [x["loss"] for x in metrics.get("log_history", []) if "loss" in x]
-            print(f"reuse completed training: {output_dir}")
-            return SimpleNamespace(adapter_path=str(adapter), merged_path="" if qlora else str(merged),
-                                   loss_decreased=len(losses) >= 2 and losses[-1] < losses[0],
-                                   wall_s=metrics.get("wall_s"))
+        try:
+            metrics = json.loads(metrics_file.read_text(encoding="utf-8"))
+            if metrics.get("n_train") == len(train) and metrics.get("n_id_val") == len(val):
+                losses = [x["loss"] for x in metrics.get("log_history", []) if "loss" in x]
+                print(f"reuse completed training: {output_dir}")
+                return SimpleNamespace(adapter_path=str(adapter), merged_path="" if qlora else str(merged),
+                                       loss_decreased=len(losses) >= 2 and losses[-1] < losses[0],
+                                       wall_s=metrics.get("wall_s"))
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     # finetune_lora finds the latest valid checkpoint, skipping a checkpoint
     # left half-written by a sudden power cut.
     return finetune_lora(train_cfg, train, val)
