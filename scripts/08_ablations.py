@@ -201,28 +201,55 @@ def _train_or_resume(train_cfg: dict, train: pd.DataFrame, val: pd.DataFrame,
     return finetune_lora(train_cfg, train, val)
 
 
-def _hidden_features(model, tokenizer, frame: pd.DataFrame, template: str, max_len: int) -> np.ndarray:
+def _hidden_features(model, tokenizer, frame: pd.DataFrame, template: str, max_len: int,
+                     cache_dir: Path | None = None) -> np.ndarray:
     """Last real-token hidden state for a frozen, unmodified causal backbone."""
     model.eval()
     original_side = tokenizer.truncation_side
     tokenizer.truncation_side = "left"
     device = next(model.parameters()).device
     features = []
+    if cache_dir is not None:
+        source = {"ids_and_text": _hash(frame[["example_id", "text"]].astype(str).values.tolist()),
+                  "template": template, "max_len": max_len,
+                  "model": str(getattr(model.config, "_name_or_path", ""))}
+        cache_dir = cache_dir / _hash(source)[:16]
+        cache_dir.mkdir(parents=True, exist_ok=True)
     try:
         with torch.no_grad():
-            for start in range(0, len(frame), 4):
-                prompts = [build_prompt(t, template) for t in frame["text"].iloc[start:start + 4]]
-                inputs = tokenizer(prompts, padding=True, truncation=True,
-                                   max_length=max_len, return_tensors="pt")
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-                output = model(**inputs, output_hidden_states=True, use_cache=False)
-                hidden = output.hidden_states[-1]
-                if tokenizer.padding_side == "left":
-                    positions = torch.full((len(prompts),), hidden.shape[1] - 1, device=device)
-                else:
-                    positions = inputs["attention_mask"].sum(dim=1) - 1
-                vectors = hidden[torch.arange(len(prompts), device=device), positions]
-                features.append(vectors.float().cpu().numpy())
+            for block_start in range(0, len(frame), 128):
+                block_end = min(len(frame), block_start + 128)
+                saved = cache_dir / f"{block_start}_{block_end}.npy" if cache_dir else None
+                block = None
+                if saved is not None and saved.is_file():
+                    try:
+                        candidate = np.load(saved, allow_pickle=False)
+                        if candidate.shape[0] == block_end - block_start and np.isfinite(candidate).all():
+                            block = candidate
+                    except (OSError, ValueError):
+                        pass
+                if block is None:
+                    pieces = []
+                    for start in range(block_start, block_end, 4):
+                        prompts = [build_prompt(t, template) for t in frame["text"].iloc[start:min(start + 4, block_end)]]
+                        inputs = tokenizer(prompts, padding=True, truncation=True,
+                                           max_length=max_len, return_tensors="pt")
+                        inputs = {k: v.to(device) for k, v in inputs.items()}
+                        output = model(**inputs, output_hidden_states=True, use_cache=False)
+                        hidden = output.hidden_states[-1]
+                        if tokenizer.padding_side == "left":
+                            positions = torch.full((len(prompts),), hidden.shape[1] - 1, device=device)
+                        else:
+                            positions = inputs["attention_mask"].sum(dim=1) - 1
+                        vectors = hidden[torch.arange(len(prompts), device=device), positions]
+                        pieces.append(vectors.float().cpu().numpy())
+                    block = np.concatenate(pieces)
+                    if saved is not None:
+                        tmp = saved.with_name(saved.name + f".{os.getpid()}.part")
+                        with open(tmp, "wb") as file:
+                            np.save(file, block)
+                        os.replace(tmp, saved)
+                features.append(block)
     finally:
         tokenizer.truncation_side = original_side
     result = np.concatenate(features)
