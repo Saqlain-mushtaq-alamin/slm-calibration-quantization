@@ -1,0 +1,16 @@
+model_key: banglabert
+model_id: csebuetnlp/banglabert
+language: bn
+data: data/processed/bd_shs_processed.csv
+splits: data/splits/bd_shs_loco_splits.json
+fold: loco_slander
+seed: 42
+max_length: 256
+batch_size: 8
+eval_batch_size: 8
+gradient_accumulation_steps: 4
+learning_rate: 2.0e-5
+epochs: 3
+weight_decay: 0.01
+save_steps: 250
+output: outputs/encoders/banglabert

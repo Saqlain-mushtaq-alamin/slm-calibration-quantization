@@ -1,0 +1,16 @@
+model_key: xlmr
+model_id: FacebookAI/xlm-roberta-base
+language: en
+data: data/processed/english_control_matched.csv
+splits: data/splits/english_control_loco_splits.json
+fold: loco_lgbtq
+seed: 42
+max_length: 256
+batch_size: 8
+eval_batch_size: 8
+gradient_accumulation_steps: 4
+learning_rate: 2.0e-5
+epochs: 3
+weight_decay: 0.01
+save_steps: 250
+output: outputs/encoders/xlmr
