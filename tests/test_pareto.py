@@ -35,7 +35,8 @@ def test_frontiers_all_groups_and_unavailable_energy():
                              "ece_equal_mass_15": ece, "aurc": ece,
                              "latency_p50_ms": memory, "latency_stable": True,
                              "vram_measurement": "measured", "power_available": False,
-                             "energy_stable": False, "energy_per_1k_joules": np.nan,
+                             "energy_stable": False, "thermal_stable": True,
+                             "energy_per_1k_joules": np.nan,
                              "one_minus_f1": ece})
     points, summary, comparison = frontiers(pd.DataFrame(rows))
     assert len(summary) == 20
@@ -59,7 +60,7 @@ def test_derived_ratios_same_frozen_examples():
     base = {"base_run": "r", "model": "m", "seed": 42, "lang": "en", "loco": "fold",
             "eval_set": "id_test", "n_samples": 2, "sample_fingerprint": "abc",
             "aurc": .1, "ece_equal_mass_15": .1, "energy_per_1k_joules": np.nan,
-            "power_available": False, "energy_stable": False}
+            "power_available": False, "energy_stable": False, "thermal_stable": True}
     frame = pd.DataFrame([{**base, "method": "bf16", "peak_vram_mb": 2048},
                           {**base, "method": "int8", "artifact": "a", "peak_vram_mb": 1024,
                            "aurc": .12, "ece_equal_mass_15": .15}])

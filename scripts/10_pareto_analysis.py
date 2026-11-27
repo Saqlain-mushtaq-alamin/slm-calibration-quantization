@@ -38,8 +38,9 @@ def write_report(path: Path, summary, comparisons, ratios, manifest):
                "`compression_pct = 100 × (1 − variant VRAM / BF16 VRAM)`. "
                "ΔECE and ΔAURC are variant minus paired BF16. Nonpositive memory savings leave the first two ratios undefined."), "",
               "## Limits", "",
-              ("Phase 10 recorded no usable GPU power telemetry, so energy frontiers and joules ratios are unavailable. "
-               "Its overall status is incomplete. Latency frontiers use only records marked stable; memory frontiers use measured VRAM even where other efficiency gates failed."),
+              ((manifest["energy_limitation"] or "Energy pairs use measured power, energy-stable, and thermally stable rows.") +
+               f" Phase 10 status: {manifest['source_phase_statuses']['phase10']}. "
+               "Latency frontiers use only records marked stable; memory frontiers use measured VRAM even where other efficiency gates failed."),
               "Bengali OOD is single-class. Its ECE is reported as an observed error against that target prior and is not directly comparable to ordinary two-class OOD ECE.",
               "Global frontier membership compares model configurations and seeds; paired dominance checks compare precision methods within the same base run.", ""]
     path.write_text("\n".join(lines), encoding="utf-8")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -86,7 +87,8 @@ def eligible(frame: pd.DataFrame, efficiency_metric: str, quality_metric: str) -
         base = base.loc[np.isfinite(pd.to_numeric(base[metric], errors="coerce"))]
     base = base.loc[base[efficiency_metric] > 0]
     if efficiency_metric == "energy_per_1k_joules":
-        base = base.loc[base.power_available.eq(True) & base.energy_stable.eq(True)]
+        base = base.loc[base.power_available.eq(True) & base.energy_stable.eq(True) &
+                        base.thermal_stable.eq(True)]
         reason = "No valid measured energy telemetry" if base.empty else None
     elif efficiency_metric == "latency_p50_ms":
         base = base.loc[base.latency_stable.eq(True)]
@@ -160,7 +162,7 @@ def derived_ratios(joined: pd.DataFrame) -> pd.DataFrame:
     keys = ["base_run", "model", "seed", "lang", "loco", "eval_set", "n_samples", "sample_fingerprint"]
     bf = joined.loc[joined.method == "bf16", keys +
                     ["ece_equal_mass_15", "aurc", "peak_vram_mb", "energy_per_1k_joules",
-                     "power_available", "energy_stable"]]
+                     "power_available", "energy_stable", "thermal_stable"]]
     variant = joined.loc[joined.method != "bf16"]
     paired = variant.merge(bf, on=keys, suffixes=("", "_bf16"), validate="many_to_one")
     rows = []
@@ -170,8 +172,10 @@ def derived_ratios(joined: pd.DataFrame) -> pd.DataFrame:
         delta_ece = row.ece_equal_mass_15 - row.ece_equal_mass_15_bf16
         delta_aurc = row.aurc - row.aurc_bf16
         energy_ok = (pd.notna(row.energy_per_1k_joules) and pd.notna(row.energy_per_1k_joules_bf16)
+                     and row.energy_per_1k_joules > 0 and row.energy_per_1k_joules_bf16 > 0
                      and bool(row.power_available) and bool(row.power_available_bf16)
-                     and bool(row.energy_stable) and bool(row.energy_stable_bf16))
+                     and bool(row.energy_stable) and bool(row.energy_stable_bf16)
+                     and bool(row.thermal_stable) and bool(row.thermal_stable_bf16))
         rows.append({"artifact": row.artifact, "base_run": row.base_run, "model": row.model,
                      "seed": int(row.seed), "lang": row.lang, "loco": row.loco,
                      "eval_set": row.eval_set, "method": row.method,
@@ -190,12 +194,18 @@ def run_phase14(results_dir: Path):
     joined, sources = assemble(results_dir)
     points, summary, comparisons = frontiers(joined)
     ratios = derived_ratios(joined.loc[joined.eval_set.isin(EVAL_SETS)])
+    phase_statuses = {}
+    for phase in (8, 9, 10):
+        path = results_dir / f"phase{phase}_run.json"
+        phase_statuses[f"phase{phase}"] = json.loads(path.read_text())["status"] if path.exists() else "missing"
     complete = bool(summary.status.eq("computed").all() and not ratios.empty and
-                    ratios.joules_saved_per_delta_ece.notna().any())
+                    ratios.joules_saved_per_delta_ece.notna().any() and
+                    phase_statuses == {"phase8": "success", "phase9": "success", "phase10": "success"})
     manifest = {"phase": 14, "status": "complete" if complete else "partial",
                 "sources": sources, "n_joined": len(joined), "n_frontiers_expected": len(PAIRS) * len(EVAL_SETS) * len(LANGUAGES),
                 "n_frontiers_computed": int(summary.status.eq("computed").sum()),
                 "n_ratio_rows": len(ratios),
+                "source_phase_statuses": phase_statuses,
                 "energy_limitation": "All energy frontiers unavailable: Phase 10 has no measured GPU power telemetry" if not joined.energy_per_1k_joules.notna().any() else None,
                 "measurement_note": "Memory uses measured peak VRAM; latency frontiers require stable Phase 10 latency. Phase 10 overall status is incomplete.",
                 "single_class_ood_note": "Bengali OOD ECE reflects a single-class target and is not directly comparable to conventional two-class ECE."}
