@@ -122,13 +122,18 @@ def _mixed_interaction(metrics: pd.DataFrame, *, factor: str) -> dict:
                 raise RuntimeError(f"Interaction term not uniquely found: {terms}")
             name = terms[0]
             ci = fit.conf_int().loc[name]
+            warning_text = "; ".join(sorted({str(w.message) for w in caught}))
+            valid = bool(fit.converged) and "Hessian matrix at the estimated parameter values is not positive definite" not in warning_text
             return {"factor": factor, "method": "gptq_int4", "converged": bool(fit.converged),
-                    "coefficient": float(fit.params[name]), "ci_lower": float(ci.iloc[0]) if fit.converged else None,
-                    "ci_upper": float(ci.iloc[1]) if fit.converged else None, "p_value": float(fit.pvalues[name]) if fit.converged else None,
+                    "inference_valid": valid, "coefficient": float(fit.params[name]),
+                    "ci_lower": float(ci.iloc[0]) if valid else None,
+                    "ci_upper": float(ci.iloc[1]) if valid else None,
+                    "p_value": float(fit.pvalues[name]) if valid else None,
                     "n_observations": len(data), "n_models": int(data.model.nunique()),
-                    "warning": "; ".join(sorted({str(w.message) for w in caught})), "error": None}
+                    "warning": warning_text, "error": None}
         except Exception as exc:
             return {"factor": factor, "method": "gptq_int4", "converged": False,
+                    "inference_valid": False,
                     "coefficient": None, "ci_lower": None, "ci_upper": None, "p_value": None,
                     "n_observations": len(data), "n_models": int(data.model.nunique()),
                     "warning": "; ".join(sorted({str(w.message) for w in caught})),
