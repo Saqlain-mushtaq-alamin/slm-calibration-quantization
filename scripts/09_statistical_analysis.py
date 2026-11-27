@@ -35,7 +35,8 @@ def main() -> int:
                    phase_name="statistical_analysis_hypothesis_testing", status="partial",
                    seed=args.seed, payload={**summary, "n_boot": args.n_boot,
                                             "source_phase12_status": source_phase12_status})
-    print(f"Phase 13 partial: {len(table)} contrasts, {int(interactions.converged.sum())}/2 mixed models converged")
+    print(f"Phase 13 partial: {len(table)} contrasts, {int(interactions.converged.sum())}/2 mixed models converged, "
+          f"{int(interactions.inference_valid.sum())}/2 support mixed-model inference")
     print(args.results_dir / "hypothesis_tests.csv")
     return 0
 

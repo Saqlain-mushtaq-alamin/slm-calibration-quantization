@@ -26,6 +26,8 @@ def test_phase13_real_results_smoke():
     assert len(table) == 138
     assert set(interactions.factor) == {"domain", "language"}
     assert interactions.converged.all()
+    assert not interactions.loc[interactions.factor == "domain", "inference_valid"].iloc[0]
+    assert pd.isna(interactions.loc[interactions.factor == "domain", "p_value"].iloc[0])
     assert (table.p_holm >= table.p_value).all()
     assert (table.loc[table.hypothesis == "H7", "status"] == "partial").all()
     assert (table.loc[table.hypothesis == "H7", "n_models"] == 2).all()

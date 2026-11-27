@@ -294,6 +294,7 @@ def run_phase13(results_dir: Path, *, n_boot: int = 10000, seed: int = 42) -> tu
                "hypotheses": sorted(set(table.hypothesis)),
                "mixed_models_converged": int(interactions.converged.sum()),
                "mixed_models_total": len(interactions),
+               "mixed_models_inference_valid": int(interactions.inference_valid.sum()),
                "limitations": ["AWQ unavailable in Phase 12", "No OOD-validation oracle temperature",
                                "Phase 14 Pareto frontier not yet computed",
                                "OOD targets can be single-class and shift class prior"]}
