@@ -47,6 +47,13 @@ def test_frontiers_all_groups_and_unavailable_energy():
     assert points.loc[points.pair.eq("peak_vram_mb__ece_equal_mass_15") & points.on_frontier,
                       "method"].eq("int8").all()
 
+    full = pd.DataFrame(rows)
+    full["energy_per_1k_joules"] = full["peak_vram_mb"] * 10
+    full["power_available"] = True
+    full["energy_stable"] = True
+    _, all_summary, _ = frontiers(full)
+    assert all_summary.status.eq("computed").all()
+
 
 def test_derived_ratios_same_frozen_examples():
     base = {"base_run": "r", "model": "m", "seed": 42, "lang": "en", "loco": "fold",
@@ -76,3 +83,16 @@ def test_real_sources_are_joined_without_fabrication():
     assert len(points) > 0 and len(ratios) > 0 and len(comparisons) == 10
     assert summary.loc[summary.status.eq("computed"), "n_frontier"].ge(1).all()
     assert summary.loc[summary.pair.str.startswith("energy"), "status"].eq("unavailable").all()
+
+
+def test_provenance_mismatch_is_rejected(tmp_path):
+    source = Path("outputs/results")
+    if not (source / "all_metrics.parquet").exists():
+        pytest.skip("research artifacts absent")
+    for name in ("all_metrics", "selective_metrics", "efficiency_metrics"):
+        frame = pd.read_parquet(source / f"{name}.parquet")
+        if name == "selective_metrics":
+            frame.loc[0, "sample_fingerprint"] = "tampered"
+        frame.to_parquet(tmp_path / f"{name}.parquet", index=False)
+    with pytest.raises(ValueError, match="provenance"):
+        assemble(tmp_path)
