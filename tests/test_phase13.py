@@ -5,7 +5,6 @@ import pytest
 
 from src.analysis.phase13 import prepare_pairs, run_phase13
 
-
 RESULTS = Path(__file__).resolve().parents[1] / "outputs/results"
 
 

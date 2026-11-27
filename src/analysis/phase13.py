@@ -10,7 +10,10 @@ import pandas as pd
 import statsmodels.formula.api as smf
 
 from src.analysis.statistical_tests import (
-    apply_correction, cliffs_delta, cohens_d, paired_bootstrap_delta,
+    apply_correction,
+    cliffs_delta,
+    cohens_d,
+    paired_bootstrap_delta,
     tost_equivalence,
 )
 
@@ -131,7 +134,7 @@ def _mixed_interaction(metrics: pd.DataFrame, *, factor: str) -> dict:
                     "p_value": float(fit.pvalues[name]) if valid else None,
                     "n_observations": len(data), "n_models": int(data.model.nunique()),
                     "warning": warning_text, "error": None}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - retain failed model as a reported analysis result
             return {"factor": factor, "method": "gptq_int4", "converged": False,
                     "inference_valid": False,
                     "coefficient": None, "ci_lower": None, "ci_upper": None, "p_value": None,

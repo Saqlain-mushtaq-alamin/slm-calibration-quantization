@@ -2,7 +2,11 @@ import numpy as np
 import pytest
 
 from src.analysis.statistical_tests import (
-    apply_correction, cliffs_delta, cohens_d, paired_bootstrap_delta, tost_equivalence,
+    apply_correction,
+    cliffs_delta,
+    cohens_d,
+    paired_bootstrap_delta,
+    tost_equivalence,
 )
 
 

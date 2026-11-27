@@ -6,8 +6,9 @@ per-example pairing remains available here for focused bootstrap checks.
 
 from __future__ import annotations
 
-import numpy as np
 from itertools import product
+
+import numpy as np
 from scipy.stats import t as student_t
 from statsmodels.stats.multitest import multipletests
 

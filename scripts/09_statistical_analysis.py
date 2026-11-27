@@ -10,9 +10,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.analysis.phase13 import run_phase13  # noqa: E402
-from src.utils.atomic import atomic_write_csv, atomic_write_parquet  # noqa: E402
-from src.utils.logging_utils import write_run_json  # noqa: E402
+from src.analysis.phase13 import run_phase13
+from src.utils.atomic import atomic_write_csv, atomic_write_parquet
+from src.utils.logging_utils import write_run_json
 
 
 def main() -> int:
