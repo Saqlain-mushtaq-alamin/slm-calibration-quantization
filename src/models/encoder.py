@@ -130,6 +130,9 @@ def manifest_base(cfg: dict, split_sha: str, frames: dict) -> dict:
 
 
 def logits_frame(model, tokenizer, frame: pd.DataFrame, cfg: dict, device: str = "cpu") -> tuple[pd.DataFrame, dict]:
+    import psutil
+
+    rss_before = psutil.Process().memory_info().rss if device == "cpu" else None
     model.to(device).eval()
     logits = []
     start = time.perf_counter()
@@ -152,7 +155,9 @@ def logits_frame(model, tokenizer, frame: pd.DataFrame, cfg: dict, device: str =
     if out.example_id.duplicated().any() or not np.isfinite(probs).all() or not np.allclose(probs.sum(axis=1), 1):
         raise ValueError("Invalid probabilities or IDs")
     elapsed = time.perf_counter() - start
-    return out, {"latency_seconds_per_example": elapsed / len(frame), "total_seconds": elapsed}
+    rss_after = psutil.Process().memory_info().rss if device == "cpu" else None
+    return out, {"latency_seconds_per_example": elapsed / len(frame), "total_seconds": elapsed,
+                 "cpu_rss_before_bytes": rss_before, "cpu_rss_after_bytes": rss_after}
 
 
 def evaluate_and_save(model, tokenizer, frames, cfg, split_sha, precision: str, output: Path, device="cpu") -> dict:

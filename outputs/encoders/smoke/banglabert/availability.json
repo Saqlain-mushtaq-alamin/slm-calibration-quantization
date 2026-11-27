@@ -1,0 +1,9 @@
+{
+  "phase": 16,
+  "model": "csebuetnlp/banglabert",
+  "model_key": "banglabert",
+  "fp32": "unavailable",
+  "int8": "unavailable",
+  "reason": "Model files not cached; rerun with --allow-download when Hugging Face is reachable",
+  "smoke_only": true
+}

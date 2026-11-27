@@ -1,0 +1,9 @@
+{
+  "phase": 16,
+  "model": "FacebookAI/xlm-roberta-base",
+  "model_key": "xlmr",
+  "fp32": "unavailable",
+  "int8": "unavailable",
+  "reason": "Model files not cached; rerun with --allow-download when Hugging Face is reachable",
+  "smoke_only": true
+}
