@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import platform
 import time
@@ -36,6 +37,9 @@ def load_config(path: str | Path) -> dict:
 
 def load_frozen(cfg: dict) -> tuple[dict[str, pd.DataFrame], str]:
     frames, sha = frozen_frames(Path(cfg["data"]), Path(cfg["splits"]), cfg["fold"])
+    sidecar = Path(str(cfg["splits"]) + ".sha256")
+    if not sidecar.is_file() or sidecar.read_text().strip() != sha:
+        raise ValueError("Frozen split checksum does not match registered sidecar")
     for name, frame in frames.items():
         if not set(frame["label"].astype(int)).issubset({0, 1}):
             raise ValueError(f"Invalid labels in {name}")
@@ -43,11 +47,16 @@ def load_frozen(cfg: dict) -> tuple[dict[str, pd.DataFrame], str]:
 
 
 def prepare_text(text: str, language: str) -> str:
-    # Both processed CSVs already contain project-normalized text. Keep the
-    # same normalization at tokenization time; XLM-R needs no Bengali normalizer.
     if language not in {"bn", "en"}:
         raise ValueError(language)
-    return normalize_text(text)
+    value = normalize_text(text)
+    if language == "bn":
+        try:
+            from normalizer import normalize
+        except ImportError as exc:
+            raise RuntimeError("Install csebuetnlp/normalizer for BanglaBERT") from exc
+        value = normalize(value)
+    return value
 
 
 class EncodedDataset(torch.utils.data.Dataset):
@@ -115,6 +124,10 @@ def fingerprint(frame: pd.DataFrame) -> str:
 def manifest_base(cfg: dict, split_sha: str, frames: dict) -> dict:
     import transformers
 
+    try:
+        normalizer_version = importlib.metadata.version("normalizer")
+    except importlib.metadata.PackageNotFoundError:
+        normalizer_version = None
     return {
         "phase": 16, "status": "running", "model": cfg["model_id"],
         "model_revision": None, "precision": "FP32", "language": cfg["language"],
@@ -123,6 +136,7 @@ def manifest_base(cfg: dict, split_sha: str, frames: dict) -> dict:
         "training_configuration": cfg, "package_versions": {
             "torch": torch.__version__, "transformers": transformers.__version__,
             "numpy": np.__version__, "pandas": pd.__version__,
+            "normalizer": normalizer_version,
         }, "hardware": {"cpu": platform.processor(), "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None},
         "checkpoint": None, "global_step": 0, "epoch": 0,
         "metrics": {}, "runtime_seconds": 0,

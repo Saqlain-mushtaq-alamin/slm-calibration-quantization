@@ -97,7 +97,7 @@ def train(cfg: dict, smoke: bool = False, explicit_resume: bool = False):
         load_best_model_at_end=True, metric_for_best_model="macro_f1", greater_is_better=True,
         logging_dir=str(output / "logs"), logging_steps=1 if smoke else 20,
         report_to="none", fp16=False, bf16=False, dataloader_num_workers=0,
-        max_steps=(3 if latest else 2) if smoke else -1,
+        max_steps=(int(json.loads((latest / "trainer_state.json").read_text())["global_step"]) + 1 if latest else 2) if smoke else -1,
     )
 
     def metrics(pred):
@@ -119,15 +119,18 @@ def train(cfg: dict, smoke: bool = False, explicit_resume: bool = False):
         best = Path(trainer.state.best_model_checkpoint) if trainer.state.best_model_checkpoint else latest_checkpoint(checkpoint_root)
         if best is None or not checkpoint_valid(best):
             raise RuntimeError("No valid best checkpoint")
-        best_dest = output / "best_checkpoint"
-        if not checkpoint_valid(best_dest) or manifest.get("checkpoint") != str(best):
-            staging = output / "best_checkpoint.new"
-            if staging.exists():
-                shutil.rmtree(staging)
-            shutil.copytree(best, staging)
-            if best_dest.exists():
-                shutil.rmtree(best_dest)
-            staging.rename(best_dest)
+        best_root = output / "best_checkpoint"
+        previous_best = Path(manifest.get("best_checkpoint", str(best_root)))
+        if checkpoint_valid(previous_best) and json.loads((previous_best / "trainer_state.json").read_text())["global_step"] == int(best.name.split("-")[-1]):
+            best_dest = previous_best
+        elif checkpoint_valid(best_root):
+            best_dest = best_root / best.name
+            if not checkpoint_valid(best_dest):
+                shutil.copytree(best, best_dest, dirs_exist_ok=True)
+        else:
+            best_dest = best_root
+            shutil.copytree(best, best_dest, dirs_exist_ok=True)
+        manifest["best_checkpoint"] = str(best_dest)
         manifest["checkpoint"] = str(best)
         manifest["global_step"] = trainer.state.global_step
         manifest["epoch"] = trainer.state.epoch

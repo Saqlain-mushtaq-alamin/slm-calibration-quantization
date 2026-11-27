@@ -1,6 +1,7 @@
 model_key: xlmr
 model_id: FacebookAI/xlm-roberta-base
 language: en
+preprocessing: project_normalize_text
 data: data/processed/english_control_matched.csv
 splits: data/splits/english_control_loco_splits.json
 fold: loco_lgbtq

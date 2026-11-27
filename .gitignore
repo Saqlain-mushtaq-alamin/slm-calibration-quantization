@@ -28,6 +28,14 @@ outputs/figures/
 outputs/tables/
 outputs/phase12_smoke/
 outputs/phase12_work/
+outputs/encoders/**/checkpoints/
+outputs/encoders/**/best_checkpoint/
+outputs/encoders/**/best_checkpoint.new/
+outputs/encoders/**/predictions/
+outputs/encoders/**/metrics/
+outputs/encoders/**/logs/
+outputs/encoders/**/run.json
+outputs/encoders/**/int8_run.json
 outputs/environment_versions.json
 gptq_log_*.log
 *.gguf

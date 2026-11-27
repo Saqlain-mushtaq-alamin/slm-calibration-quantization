@@ -1,0 +1,22 @@
+{
+  "phase": 16,
+  "status": "PARTIAL",
+  "arms": {
+    "banglabert_fp32": {
+      "status": "missing",
+      "reason": "outputs\\encoders\\banglabert\\run.json"
+    },
+    "banglabert_int8": {
+      "status": "missing",
+      "reason": "outputs\\encoders\\banglabert\\int8_run.json"
+    },
+    "xlmr_fp32": {
+      "status": "missing",
+      "reason": "outputs\\encoders\\xlmr\\run.json"
+    },
+    "xlmr_int8": {
+      "status": "missing",
+      "reason": "outputs\\encoders\\xlmr\\int8_run.json"
+    }
+  }
+}

@@ -4,6 +4,7 @@ import argparse
 import json
 import platform
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -22,6 +23,7 @@ from src.utils.atomic import atomic_write_json
 
 
 def main(config: str):
+    started = time.perf_counter()
     cfg = load_config(config)
     output = Path(cfg["output"])
     run_path = output / "run.json"
@@ -30,7 +32,7 @@ def main(config: str):
     run = json.loads(run_path.read_text())
     if run["status"] != "completed" or run.get("smoke_only"):
         raise RuntimeError("FP32 full training is not complete")
-    best = output / "best_checkpoint"
+    best = Path(run.get("best_checkpoint", output / "best_checkpoint"))
     if not checkpoint_valid(best):
         raise RuntimeError("Best FP32 checkpoint is incomplete")
     frames, sha = load_frozen(cfg)
@@ -59,6 +61,7 @@ def main(config: str):
            "hardware": {"cpu": platform.processor(), "gpu": None},
            "checkpoint": str(best), "global_step": run["global_step"], "epoch": run["epoch"],
            "quantized_modules": modules, "metrics": int8_metrics, "fp32_cpu_metrics": fp_metrics,
+           "runtime_seconds": time.perf_counter() - started,
            "note": "CPU dynamic INT8 only; no GPU speed or energy claim"}
     atomic_write_json(output / "int8_run.json", arm)
     return arm

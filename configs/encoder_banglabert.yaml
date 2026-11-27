@@ -1,6 +1,7 @@
 model_key: banglabert
 model_id: csebuetnlp/banglabert
 language: bn
+preprocessing: project_normalize_text_then_csebuetnlp_normalizer
 data: data/processed/bd_shs_processed.csv
 splits: data/splits/bd_shs_loco_splits.json
 fold: loco_slander

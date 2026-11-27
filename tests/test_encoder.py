@@ -2,6 +2,9 @@
 
 import json
 import math
+import sys
+import types
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -60,6 +63,21 @@ def test_tokenization_labels_and_preprocessing():
     assert prepare_text(frame.text.iloc[0], "en") == "hello world"
     with pytest.raises(ValueError):
         prepare_text("x", "invalid")
+
+
+def test_bangla_normalizer_hook(monkeypatch):
+    monkeypatch.setitem(sys.modules, "normalizer", types.SimpleNamespace(normalize=lambda text: text + "!"))
+    assert prepare_text("  বাংলা  ", "bn") == "বাংলা!"
+
+
+def test_frozen_sidecar_mismatch(tmp_path):
+    cfg = load_config("configs/encoder_xlmr.yaml")
+    sidecar = tmp_path / "splits.json.sha256"
+    sidecar.write_text("wrong")
+    cfg["splits"] = str(tmp_path / "splits.json")
+    Path(cfg["splits"]).write_bytes(Path("data/splits/english_control_loco_splits.json").read_bytes())
+    with pytest.raises(ValueError, match="checksum"):
+        load_frozen(cfg)
 
 
 def test_forward_backward_checkpoint_resume_int8_and_output(tmp_path):
