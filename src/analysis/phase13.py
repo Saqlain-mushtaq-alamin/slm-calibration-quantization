@@ -116,15 +116,15 @@ def _mixed_interaction(metrics: pd.DataFrame, *, factor: str) -> dict:
         warnings.simplefilter("always")
         try:
             fit = smf.mixedlm(formula, data=data, groups=data["model"],
-                              re_formula="1", vc_formula={"seed": "0+C(seed)"}).fit(reml=False, method="lbfgs", maxiter=500, disp=False)
+                              re_formula="1", vc_formula={"seed": "0+C(seed)"}).fit(reml=False, method="powell", maxiter=1000, disp=False)
             terms = [name for name in fit.params.index if ":" in name and all(part in name for part in term_parts)]
             if len(terms) != 1:
                 raise RuntimeError(f"Interaction term not uniquely found: {terms}")
             name = terms[0]
             ci = fit.conf_int().loc[name]
             return {"factor": factor, "method": "gptq_int4", "converged": bool(fit.converged),
-                    "coefficient": float(fit.params[name]), "ci_lower": float(ci.iloc[0]),
-                    "ci_upper": float(ci.iloc[1]), "p_value": float(fit.pvalues[name]),
+                    "coefficient": float(fit.params[name]), "ci_lower": float(ci.iloc[0]) if fit.converged else None,
+                    "ci_upper": float(ci.iloc[1]) if fit.converged else None, "p_value": float(fit.pvalues[name]) if fit.converged else None,
                     "n_observations": len(data), "n_models": int(data.model.nunique()),
                     "warning": "; ".join(sorted({str(w.message) for w in caught})), "error": None}
         except Exception as exc:

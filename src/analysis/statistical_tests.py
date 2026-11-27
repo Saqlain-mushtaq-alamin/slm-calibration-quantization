@@ -7,6 +7,7 @@ per-example pairing remains available here for focused bootstrap checks.
 from __future__ import annotations
 
 import numpy as np
+from itertools import product
 from scipy.stats import t as student_t
 from statsmodels.stats.multitest import multipletests
 
@@ -37,10 +38,13 @@ def paired_bootstrap_delta(metric_a, metric_b, n_resamples: int = 10000, seed: i
         indices = rng.integers(0, len(diff), size=(end - start, len(diff)))
         draws[start:end] = diff[indices].mean(axis=1)
     low, high = np.percentile(draws, [2.5, 97.5])
-    if np.all(diff == 0):
-        p_value = 1.0
+    # With only a few model families, bootstrap tail frequencies are badly
+    # anti-conservative. Use the exact paired sign-flip null for the p-value.
+    if len(diff) <= 20:
+        null_means = np.fromiter((np.mean(diff * signs) for signs in product((-1, 1), repeat=len(diff))),
+                                 dtype=float, count=2 ** len(diff))
+        p_value = float(np.mean(np.abs(null_means) >= abs(observed) - 1e-12))
     else:
-        # Add-one correction avoids a spurious exact zero with finite draws.
         p_value = min(1.0, 2 * min((np.count_nonzero(draws <= 0) + 1) / (n_resamples + 1),
                                     (np.count_nonzero(draws >= 0) + 1) / (n_resamples + 1)))
     return {"observed_delta": observed, "ci_lower": float(low), "ci_upper": float(high),
