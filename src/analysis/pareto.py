@@ -159,7 +159,8 @@ def derived_ratios(joined: pd.DataFrame) -> pd.DataFrame:
     """Paired descriptive differences versus BF16; undefined ratios are null."""
     keys = ["base_run", "model", "seed", "lang", "loco", "eval_set", "n_samples", "sample_fingerprint"]
     bf = joined.loc[joined.method == "bf16", keys +
-                    ["ece_equal_mass_15", "aurc", "peak_vram_mb", "energy_per_1k_joules"]]
+                    ["ece_equal_mass_15", "aurc", "peak_vram_mb", "energy_per_1k_joules",
+                     "power_available", "energy_stable"]]
     variant = joined.loc[joined.method != "bf16"]
     paired = variant.merge(bf, on=keys, suffixes=("", "_bf16"), validate="many_to_one")
     rows = []
@@ -168,7 +169,9 @@ def derived_ratios(joined: pd.DataFrame) -> pd.DataFrame:
         compression_pct = 100 * (1 - row.peak_vram_mb / row.peak_vram_mb_bf16)
         delta_ece = row.ece_equal_mass_15 - row.ece_equal_mass_15_bf16
         delta_aurc = row.aurc - row.aurc_bf16
-        energy_ok = pd.notna(row.energy_per_1k_joules) and pd.notna(row.energy_per_1k_joules_bf16)
+        energy_ok = (pd.notna(row.energy_per_1k_joules) and pd.notna(row.energy_per_1k_joules_bf16)
+                     and bool(row.power_available) and bool(row.power_available_bf16)
+                     and bool(row.energy_stable) and bool(row.energy_stable_bf16))
         rows.append({"artifact": row.artifact, "base_run": row.base_run, "model": row.model,
                      "seed": int(row.seed), "lang": row.lang, "loco": row.loco,
                      "eval_set": row.eval_set, "method": row.method,
